@@ -52,21 +52,34 @@ fi
 echo ">>> [5/6] Downloading Market Data (Binance Vision)..."
 # Ensure data directory exists
 mkdir -p data
-python -m src.tools.download_binance_data
+
+# Check if data already exists to avoid re-downloading
+if [ -f "data/XRP/XRPUSDT_1m.csv" ] && [ -f "data/SOL/SOLUSDT_1m.csv" ]; then
+    echo "    Data already exists. Skipping download."
+else
+    python -m src.tools.download_binance_data
+fi
 
 # 6. Model Training
 echo ">>> [6/6] Training Models..."
+# Ensure models directory exists
+mkdir -p models
 
 # XRP (Uses both TP/SL and Regime)
 echo "    [XRP] Training TP/SL Predictors..."
 python -m src.tools.train_models --pair XRPUSDT
 
-echo "    [XRP] Training Regime Classifier..."
-python -m src.tools.train_regime_classifier --pair XRPUSDT
+echo "    [XRP] Training Regime Classifier (Predictive)..."
+# Use future_returns method to predict next 4 hours (horizon=48)
+python -m src.tools.train_regime_classifier --pair XRPUSDT --method future_returns --threshold 0.01 --horizon 48
 
-# SOL (Uses Regime only)
-echo "    [SOL] Training Regime Classifier..."
-python -m src.tools.train_regime_classifier --pair SOLUSDT
+# SOL (Uses both TP/SL and Regime)
+echo "    [SOL] Training TP/SL Predictors..."
+python -m src.tools.train_models --pair SOLUSDT
+
+echo "    [SOL] Training Regime Classifier (Predictive)..."
+# Higher thresholds for SOL due to higher volatility
+python -m src.tools.train_regime_classifier --pair SOLUSDT --method future_returns --threshold 0.02 --horizon 48 --vol_threshold 0.01
 
 # BTC (DCA Mode - No ML needed)
 echo "    [BTC] Skipping ML training (DCA Mode)."
