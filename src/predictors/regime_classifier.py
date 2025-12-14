@@ -38,10 +38,15 @@ class RegimeClassifier:
                 if isinstance(artifact, dict) and "model" in artifact and "features" in artifact:
                     self.model = artifact["model"]
                     self.features = artifact["features"]
+                    # Force single-threaded inference to avoid nested parallelism warnings
+                    if hasattr(self.model, "n_jobs"):
+                        self.model.n_jobs = 1
                     logger.info(f"Loaded Regime Classifier and {len(self.features)} features from {model_path}")
                 else:
                     # Legacy fallback (if model saved directly)
                     self.model = artifact
+                    if hasattr(self.model, "n_jobs"):
+                        self.model.n_jobs = 1
                     logger.warning("Loaded legacy Regime Classifier (no feature list). Using default features.")
                     self.features = [
                         "adx",
