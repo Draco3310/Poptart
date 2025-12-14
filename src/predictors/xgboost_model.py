@@ -1,0 +1,84 @@
+import logging
+from typing import List, Optional
+
+import numpy as np
+import pandas as pd
+
+from src.predictors.base_predictor import BasePredictor
+
+logger = logging.getLogger(__name__)
+
+
+class XGBoostPredictor(BasePredictor):
+    """
+    XGBoost Predictor Plugin.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.feature_names: Optional[List[str]] = []
+
+    def load_model(self, model_path: str) -> None:
+        """
+        Loads the XGBoost model.
+        """
+        try:
+            import xgboost as xgb
+
+            self.model = xgb.Booster()
+            if self.model is None:
+                raise ValueError("Failed to initialize XGBoost Booster")
+
+            self.model.load_model(model_path)
+
+            # Try to infer feature names if available, or expect them in a separate config
+            # For this V2 implementation, we'll assume the model file preserves feature names
+            # or we might need a sidecar config.
+            # If the model was saved with feature names, `feature_names` property might work.
+            try:
+                self.feature_names = list(self.model.feature_names) if self.model.feature_names else None
+            except Exception:
+                logger.warning(
+                    "Could not extract feature names from XGBoost model. Prediction might fail if column order differs."
+                )
+
+            logger.info(f"XGBoost model loaded from {model_path}")
+        except ImportError:
+            logger.error("XGBoost not installed. Cannot load model.")
+            raise
+        except Exception as e:
+            logger.error(f"Failed to load XGBoost model: {e}")
+            raise
+
+    def predict(self, enriched_df: pd.DataFrame) -> float:
+        if not self.model:
+            raise RuntimeError("Model not loaded. Call load_model() first.")
+
+        try:
+            import xgboost as xgb
+        except ImportError:
+            raise RuntimeError("XGBoost not installed.")
+
+        # Get the last row
+        last_row = enriched_df.iloc[[-1]]
+
+        # Ensure we select only the features the model expects, if known
+        if self.feature_names:
+            # Check if all features exist
+            missing = [f for f in self.feature_names if f not in last_row.columns]
+            if missing:
+                logger.warning(f"Missing features for XGBoost: {missing}. Filling with 0.")
+                for m in missing:
+                    last_row[m] = 0.0
+
+            X = last_row[self.feature_names]
+        else:
+            # If no feature names known, use all numeric columns
+            X = last_row.select_dtypes(include=[np.number])
+
+        dtest = xgb.DMatrix(X)
+        prediction = self.model.predict(dtest)
+
+        # Prediction is typically a numpy array
+        score = float(prediction[0])
+        return score

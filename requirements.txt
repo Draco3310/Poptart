@@ -1,0 +1,10 @@
+ccxt
+pandas
+pandas-ta
+python-dotenv
+requests
+# tensorflow
+xgboost
+scikit-learn
+joblib
+pytest-asyncio
