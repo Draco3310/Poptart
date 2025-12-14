@@ -38,9 +38,11 @@ def _worker_run_backtest(args: Tuple[PairConfig, Dict[str, Any], str, str]) -> D
     Runs a single backtest with specific overrides.
     """
     pair_config, overrides, start, end = args
+    print(f"Worker starting: {overrides}")  # Debug print
     try:
         engine = BacktestEngine(pair_config, overrides)
         result = engine.run(start, end)
+        print(f"Worker finished: Sharpe={result.metrics.get('sharpe_ratio'):.2f}")  # Debug print
 
         return {
             "params": overrides,
@@ -108,7 +110,7 @@ class WalkForwardOptimizer:
         tasks = []
         for combo in combinations:
             overrides = dict(zip(keys, combo))
-            # overrides["ML_ENABLED"] = False  # Removed hardcoded disable. Controlled by Config.
+            overrides["ML_ENABLED"] = False  # Force ML off for WFO heuristic tuning
             tasks.append((self.pair_config, overrides, train_start, train_end))
 
         # Run Parallel

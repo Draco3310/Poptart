@@ -123,6 +123,11 @@ class BacktestEngine:
             # Dynamic Regime Model Path
             symbol = self.pair_config.symbol.replace("/", "")
             regime_path = get_model_path(symbol, "rf_regime", ext=".joblib")
+
+            # Disable Regime ML if ML is globally disabled (e.g. during WFO)
+            if not Config.ML_ENABLED:
+                regime_path = None
+
             strategy = StrategySelector(regime_model_path=regime_path)
             risk_manager = RiskManager()
 
