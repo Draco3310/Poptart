@@ -26,10 +26,6 @@ source venv/bin/activate
 echo ">>> [3/6] Installing Python Packages..."
 pip install --upgrade pip wheel
 
-# Install pandas-ta from development branch (Fixes Pandas 2.0+ compatibility)
-echo "    Installing pandas-ta (Dev)..."
-pip install git+https://github.com/twopirllc/pandas-ta.git@development
-
 # Install other requirements
 echo "    Installing requirements.txt..."
 pip install -r requirements.txt
