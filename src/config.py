@@ -37,8 +37,8 @@ class PairConfig:
     adx_threshold_strategy: Optional[int] = None  # If None, uses adx_threshold
 
     # ML Thresholds
-    ml_threshold_range: float = 0.0
-    ml_threshold_trend: float = 0.0
+    ml_threshold_range: float = 0.5
+    ml_threshold_trend: float = 0.5
 
     # Trend Strategy Params
     trend_trailing_stop_type: str = "ATR"  # "ATR" or "PERCENT"
@@ -244,7 +244,7 @@ PAIR_CONFIGS: Dict[str, PairConfig] = {
         adx_threshold=25,
         adx_threshold_strategy=30,
         ml_threshold_range=0.68,
-        ml_threshold_trend=0.0,
+        ml_threshold_trend=0.5,
         cooldown_minutes=30,
         trend_trailing_stop_type="ATR",
         trend_trailing_stop_multiplier=2.0,
