@@ -26,6 +26,10 @@ source venv/bin/activate
 echo ">>> [3/6] Installing Python Packages..."
 pip install --upgrade pip wheel
 
+# Install pandas-ta-openbb (Fixes Pandas 2.0+ compatibility)
+echo "    Installing pandas-ta-openbb..."
+pip install pandas-ta-openbb
+
 # Install other requirements
 echo "    Installing requirements.txt..."
 pip install -r requirements.txt
@@ -55,6 +59,10 @@ if [ -f "data/XRP/XRPUSDT_1m.csv" ] && [ -f "data/SOL/SOLUSDT_1m.csv" ]; then
 else
     python -m src.tools.download_binance_data
 fi
+
+# Update data to current time (Fill gap from Nov 30 to Now)
+echo "    Updating market data to current time..."
+python -m src.tools.update_market_data
 
 # 6. Model Training
 echo ">>> [6/6] Training Models..."

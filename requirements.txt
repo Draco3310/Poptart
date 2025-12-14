@@ -1,6 +1,6 @@
 ccxt
 pandas
-pandas-ta
+pandas-ta-openbb
 python-dotenv
 requests
 # tensorflow

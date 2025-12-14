@@ -139,9 +139,7 @@ def train_regime_classifier(
 
     # 7. Train
     logger.info("Training Random Forest...")
-    clf = RandomForestClassifier(
-        n_estimators=100, max_depth=10, random_state=42, class_weight="balanced", n_jobs=-1
-    )
+    clf = RandomForestClassifier(n_estimators=100, max_depth=10, random_state=42, class_weight="balanced", n_jobs=-1)
     clf.fit(X_train, y_train)
 
     # 8. Evaluate

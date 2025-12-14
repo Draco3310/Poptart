@@ -101,7 +101,7 @@ class WalkForwardOptimizer:
         tasks = []
         for combo in combinations:
             overrides = dict(zip(keys, combo))
-            overrides["ML_ENABLED"] = False  # Disable ML for optimization as per P5.1.2
+            # overrides["ML_ENABLED"] = False  # Removed hardcoded disable. Controlled by Config.
             tasks.append((self.pair_config, overrides, train_start, train_end))
 
         # Run Parallel
@@ -135,7 +135,7 @@ class WalkForwardOptimizer:
         total_start = time.time()
 
         for i, (train_start, train_end, test_start, test_end) in enumerate(windows):
-            # logger.info(f"Processing Window {i+1}/{len(windows)}: Test {test_start.date()} to {test_end.date()}")
+            logger.info(f"Processing Window {i + 1}/{len(windows)}: Test {test_start.date()} to {test_end.date()}")
 
             # 1. Optimize (In-Sample)
             s_train = str(train_start)

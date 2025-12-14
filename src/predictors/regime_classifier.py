@@ -8,6 +8,9 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Global cache to prevent reloading the model 81 times in WFO
+_MODEL_CACHE: dict[str, Any] = {}
+
 
 class MarketRegime(Enum):
     RANGE = 0
@@ -32,44 +35,57 @@ class RegimeClassifier:
         self.model: Any = None
         self.features: list[str] = []
 
-        if model_path and os.path.exists(model_path):
-            try:
-                artifact = joblib.load(model_path)
-                if isinstance(artifact, dict) and "model" in artifact and "features" in artifact:
-                    self.model = artifact["model"]
-                    self.features = artifact["features"]
-                    # Force single-threaded inference to avoid nested parallelism warnings
-                    if hasattr(self.model, "n_jobs"):
-                        self.model.n_jobs = 1
-                    logger.info(f"Loaded Regime Classifier and {len(self.features)} features from {model_path}")
-                else:
-                    # Legacy fallback (if model saved directly)
-                    self.model = artifact
-                    if hasattr(self.model, "n_jobs"):
-                        self.model.n_jobs = 1
-                    logger.warning("Loaded legacy Regime Classifier (no feature list). Using default features.")
-                    self.features = [
-                        "adx",
-                        "atr",
-                        "rsi",
-                        "ema200",
-                        "ema200_1h",
-                        "bb_width",
-                        "vol_zscore_20",
-                        "ms_range_zscore_20",
-                        "ms_range_to_atr",
-                        "vwap_position",
-                        "vpin_proxy",
-                        "volume_imbalance",
-                        "dist_to_vwap_atr",
-                    ]
-            except Exception as e:
-                logger.error(f"Failed to load Regime Classifier: {e}")
-        else:
-            if model_path:
-                logger.warning(f"Regime Classifier model not found at {model_path}. Using Heuristic Mode.")
+        if model_path:
+            # Check Cache First
+            if model_path in _MODEL_CACHE:
+                cached = _MODEL_CACHE[model_path]
+                self.model = cached["model"]
+                self.features = cached["features"]
+                # logger.debug(f"Using cached Regime Classifier from {model_path}")
+                return
+
+            if os.path.exists(model_path):
+                try:
+                    artifact = joblib.load(model_path)
+                    if isinstance(artifact, dict) and "model" in artifact and "features" in artifact:
+                        self.model = artifact["model"]
+                        self.features = artifact["features"]
+                        # Force single-threaded inference to avoid nested parallelism warnings
+                        if hasattr(self.model, "n_jobs"):
+                            self.model.n_jobs = 1
+                        logger.info(f"Loaded Regime Classifier and {len(self.features)} features from {model_path}")
+
+                        # Cache it
+                        _MODEL_CACHE[model_path] = {"model": self.model, "features": self.features}
+                    else:
+                        # Legacy fallback (if model saved directly)
+                        self.model = artifact
+                        if hasattr(self.model, "n_jobs"):
+                            self.model.n_jobs = 1
+                        logger.warning("Loaded legacy Regime Classifier (no feature list). Using default features.")
+                        self.features = [
+                            "adx",
+                            "atr",
+                            "rsi",
+                            "ema200",
+                            "ema200_1h",
+                            "bb_width",
+                            "vol_zscore_20",
+                            "ms_range_zscore_20",
+                            "ms_range_to_atr",
+                            "vwap_position",
+                            "vpin_proxy",
+                            "volume_imbalance",
+                            "dist_to_vwap_atr",
+                        ]
+                        # Cache it
+                        _MODEL_CACHE[model_path] = {"model": self.model, "features": self.features}
+                except Exception as e:
+                    logger.error(f"Failed to load Regime Classifier: {e}")
             else:
-                logger.info("No model path provided. Using Heuristic Mode.")
+                logger.warning(f"Regime Classifier model not found at {model_path}. Using Heuristic Mode.")
+        else:
+            logger.info("No model path provided. Using Heuristic Mode.")
 
     def predict(
         self, df: pd.DataFrame, previous_regime: Optional[MarketRegime] = None, adx_threshold: Optional[float] = None
