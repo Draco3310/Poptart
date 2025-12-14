@@ -4,6 +4,13 @@ import multiprocessing
 import os
 import sys
 import time
+
+# Force single-threaded execution for ML libraries to prevent deadlocks in multiprocessing
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple, cast
 

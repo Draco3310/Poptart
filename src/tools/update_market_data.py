@@ -41,6 +41,10 @@ def update_pair(pair: str) -> None:
         logger.error("CSV is empty.")
         return
 
+    # Ensure date column is datetime
+    if "date" in df.columns:
+        df["date"] = pd.to_datetime(df["date"])
+
     # Get last timestamp
     last_ts = int(df.iloc[-1]["open_time"])
     last_date = datetime.fromtimestamp(last_ts / 1000)
@@ -115,6 +119,15 @@ def resample_to_5m(df_1m: pd.DataFrame, symbol: str, output_dir: str) -> None:
 
     # Ensure datetime index
     df = df_1m.copy()
+    if "date" not in df.columns:
+        # Fallback if date column missing but open_time exists
+        if "open_time" in df.columns:
+            df["date"] = pd.to_datetime(df["open_time"], unit="ms")
+        else:
+            logger.error("No date or open_time column found for resampling.")
+            return
+
+    df["date"] = pd.to_datetime(df["date"])
     df.set_index("date", inplace=True)
 
     # Resample logic
