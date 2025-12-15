@@ -75,7 +75,12 @@ class FeatureEngine:
         for block in self.blocks:
             try:
                 df = block.apply(df, context=context)
-                # print(f"DEBUG: After {block.__class__.__name__}, NaNs: {df.isna().sum().sum()}")
+                nan_count = df.isna().sum().sum()
+                logger.info(f"DEBUG: After {block.__class__.__name__}, Rows: {len(df)}, NaNs: {nan_count}")
+                if nan_count > 0:
+                    # Log which columns have NaNs
+                    nan_cols = df.columns[df.isna().any()].tolist()
+                    logger.info(f"DEBUG: NaN Columns: {nan_cols}")
             except Exception as e:
                 logger.error(f"Error in feature block {block.__class__.__name__}: {e}")
 
@@ -83,10 +88,9 @@ class FeatureEngine:
         # Forward fill small gaps
         df = df.ffill()
 
-        # Backward fill remaining (mostly for initial values if minimal)
-        df = df.bfill()
-
         # Drop remaining NaNs (Warmup Period)
+        # Note: We do NOT bfill() because that would propagate future data backwards (lookahead bias)
+        # for indicators like EMA200 that have long warmup periods.
         original_len = len(df)
         df = df.dropna()
         dropped_len = original_len - len(df)

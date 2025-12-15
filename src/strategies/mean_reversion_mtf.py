@@ -42,7 +42,7 @@ class MeanReversionStrategy:
         Returns:
             Dict containing signal, metadata, and position sizing multiplier.
         """
-        if df.empty:
+        if df.empty or len(df) < 2:
             return {"signal": None}
 
         # DEBUG: Log columns and first few rows to diagnose missing data

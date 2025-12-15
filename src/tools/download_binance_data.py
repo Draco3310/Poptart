@@ -109,9 +109,8 @@ def download_and_merge(symbol: str) -> None:
         final_df.to_csv(output_file, index=False)
         logger.info(f"Saved {len(final_df)} rows to {output_file}")
 
-        # Resample to 5m for XRP and SOL
-        if symbol in ["XRPUSDT", "SOLUSDT"]:
-            resample_to_5m(final_df, symbol, output_dir)
+        # Resample to 5m for all symbols (including BTC for Beta features)
+        resample_to_5m(final_df, symbol, output_dir)
 
         print(f"Completed {symbol}.")
 

@@ -27,14 +27,14 @@ class BTCSmartDCAStrategy:
         dca_config: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
-        Analyzes the market and portfolio state to decide on a DCA buy.
+        Analyzes the market and portfolio state to decide on a Rebalancing Buy.
 
         Args:
-            df: DataFrame with indicators (must contain 'rsi').
+            df: DataFrame with indicators.
             current_price: Current price of BTC.
             current_balance_btc: Current amount of BTC held.
             current_equity_usdt: Total portfolio value in USDT.
-            dca_config: Configuration dict (target_allocation, dip_threshold, notional_per_trade).
+            dca_config: Configuration dict (target_allocation).
 
         Returns:
             Dict with 'signal' ("LONG" or None), 'size_multiplier' (fixed), and 'decision_context'.
@@ -53,42 +53,39 @@ class BTCSmartDCAStrategy:
             btc_value_usdt = current_balance_btc * current_price
             current_allocation = btc_value_usdt / current_equity_usdt if current_equity_usdt > 0 else 0.0
             target_allocation = dca_config.get("target_allocation", 0.20)
+            
+            # Rebalance Buffer (5% relative)
+            # Buy if allocation < 19% (for 20% target)
+            lower_threshold = target_allocation * 0.95
 
-            if current_allocation >= target_allocation:
+            if current_allocation >= lower_threshold:
                 result["decision_context"]["reason"] = (
-                    f"Allocation Full ({current_allocation:.2%} >= {target_allocation:.2%})"
+                    f"Allocation OK ({current_allocation:.2%} >= {lower_threshold:.2%})"
                 )
                 return result
 
-            # 2. Check Dip Condition (RSI)
-            # Get latest RSI
-            if df.empty or "rsi" not in df.columns:
-                result["decision_context"]["reason"] = "Missing Data/RSI"
-                return result
+            # 2. Signal Buy (Rebalance)
+            # Calculate Shortfall
+            target_value = current_equity_usdt * target_allocation
+            shortfall_usdt = target_value - btc_value_usdt
+            
+            if shortfall_usdt < 10.0: # Min trade size
+                 result["decision_context"]["reason"] = f"Shortfall too small ({shortfall_usdt:.2f})"
+                 return result
 
-            current_rsi = df.iloc[-1]["rsi"]
-            dip_threshold = dca_config.get("dip_threshold_rsi", 50)
-
-            if current_rsi >= dip_threshold:
-                result["decision_context"]["reason"] = f"RSI too high ({current_rsi:.2f} >= {dip_threshold})"
-                return result
-
-            # 3. Signal Buy
-            # We are below target allocation AND RSI is low.
             result["signal"] = "LONG"
-            result["size_multiplier"] = 1.0  # Not used for fixed notional, but good practice
+            result["size_multiplier"] = 1.0
             result["active_strategy"] = "BTCSmartDCA"
             result["decision_context"] = {
                 "strategy": "BTCSmartDCA",
                 "reason": (
-                    f"Dip Buy (Alloc {current_allocation:.2%} < {target_allocation:.2%}, "
-                    f"RSI {current_rsi:.2f} < {dip_threshold})"
+                    f"Rebalance Buy (Alloc {current_allocation:.2%} < {lower_threshold:.2%})"
                 ),
                 "current_allocation": current_allocation,
-                "current_rsi": current_rsi,
                 "current_balance_btc": current_balance_btc,
                 "current_equity_usdt": current_equity_usdt,
                 "target_allocation": target_allocation,
+                "shortfall_usdt": shortfall_usdt
             }
 
             return result
@@ -97,11 +94,16 @@ class BTCSmartDCAStrategy:
             logger.error(f"Error in BTCSmartDCAStrategy: {e}")
             return result
 
-    def calculate_position_size(self, dca_config: Dict[str, Any], entry_price: float) -> float:
+    def calculate_position_size(self, dca_config: Dict[str, Any], entry_price: float, shortfall_usdt: float = 0.0) -> float:
         """
-        Calculates the quantity of BTC to buy based on fixed notional amount.
+        Calculates the quantity of BTC to buy.
+        If shortfall_usdt is provided, uses that (Rebalancing).
+        Otherwise uses fixed notional (fallback).
         """
-        notional = float(dca_config.get("notional_per_trade", 10.0))
+        notional = shortfall_usdt
+        if notional <= 0:
+            notional = float(dca_config.get("notional_per_trade", 10.0))
+            
         if entry_price > 0:
             return notional / entry_price
         return 0.0

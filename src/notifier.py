@@ -35,10 +35,20 @@ class TelegramNotifier:
     def _post_request(self, payload: dict) -> None:
         """Helper to run in thread."""
         try:
+            # Try with SSL verification first
             response = requests.post(self.base_url, json=payload, timeout=10)
             response.raise_for_status()
+        except requests.exceptions.SSLError:
+            # Retry without SSL verification (Proxy workaround)
+            try:
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                response = requests.post(self.base_url, json=payload, timeout=10, verify=False)
+                response.raise_for_status()
+            except Exception as e:
+                logger.warning(f"Telegram Request Failed (SSL Error): {e}")
         except requests.exceptions.RequestException as e:
-            logger.error(f"Telegram Request Failed: {e}")
+            logger.warning(f"Telegram Request Failed: {e}")
 
     async def notify_startup(self) -> None:
         msg = f"🚀 *XRP-Sentinel V3 Started*\nSymbol: `{Config.SYMBOL}`\nTimeframe: `{Config.TIMEFRAME_PRIMARY}`"

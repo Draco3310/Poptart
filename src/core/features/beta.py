@@ -4,6 +4,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.config import Config
 from src.core.features.base import FeatureBlock
 
 logger = logging.getLogger(__name__)
@@ -56,11 +57,24 @@ class BetaFeatureBlock(FeatureBlock):
         merged["ret_sol"] = merged["close"].pct_change()
         merged["ret_btc"] = merged["close_btc"].pct_change()
 
+        # Determine window size based on timeframe
+        # Default to 1m (1440 bars for 24h)
+        window_24h = 1440
+        window_4h = 240
+
+        # Try to infer from Config or Data
+        if Config.TIMEFRAME_PRIMARY == "5m":
+            window_24h = 288  # 24 * 12
+            window_4h = 48    # 4 * 12
+        elif Config.TIMEFRAME_PRIMARY == "15m":
+            window_24h = 96
+            window_4h = 16
+        elif Config.TIMEFRAME_PRIMARY == "1h":
+            window_24h = 24
+            window_4h = 4
+
         # 1. Rolling Beta (24h)
         # Beta = Cov(SOL, BTC) / Var(BTC)
-        # Input is 1m candles.
-        window_24h = 24 * 60  # 1440 minutes
-
         cov = merged["ret_sol"].rolling(window=window_24h).cov(merged["ret_btc"])
         var = merged["ret_btc"].rolling(window=window_24h).var()
         merged["beta_24h"] = cov / var.replace(0, np.nan)
@@ -70,7 +84,6 @@ class BetaFeatureBlock(FeatureBlock):
         merged["rs_ratio"] = merged["close"] / merged["close_btc"].replace(0, np.nan)
 
         # 3. Rolling Correlation (4h)
-        window_4h = 4 * 60  # 240 minutes
         merged["btc_corr_4h"] = merged["ret_sol"].rolling(window=window_4h).corr(merged["ret_btc"])
 
         # Assign back to df

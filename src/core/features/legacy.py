@@ -3,7 +3,6 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 import pandas as pd
-import importlib.metadata  # Fix for pandas_ta AttributeError
 import pandas_ta as ta
 
 from src.config import Config

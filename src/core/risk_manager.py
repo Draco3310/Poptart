@@ -84,7 +84,8 @@ class RiskManager:
         meta["base_qty"] = base_qty
 
         # 2. Volatility Targeting Cap
-        target_daily_vol = self.vol_target_annual / 16.0
+        # Crypto is 24/7/365, so we use sqrt(365) approx 19.1
+        target_daily_vol = self.vol_target_annual / 19.1
         target_daily_risk_amt = balance * target_daily_vol
         max_qty_vol = target_daily_risk_amt / atr
         meta["max_vol_qty"] = max_qty_vol
