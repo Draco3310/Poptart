@@ -1,5 +1,5 @@
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -41,34 +41,45 @@ class RandomForestPredictor(BasePredictor):
             logger.error(f"Failed to load Random Forest model: {e}")
             raise
 
-    def predict(self, enriched_df: pd.DataFrame) -> float:
+    def predict(self, enriched_df: pd.DataFrame) -> Any:
         if not self.model:
             raise RuntimeError("Model not loaded.")
 
-        last_row = enriched_df.iloc[[-1]]
+        target_df = enriched_df
+        is_batch = len(enriched_df) > 200
+
+        if not is_batch:
+            target_df = enriched_df.iloc[[-1]]
 
         # Feature Selection
         if self.feature_names:
             # Zero fill missing features
-            missing = [f for f in self.feature_names if f not in last_row.columns]
+            missing = [f for f in self.feature_names if f not in target_df.columns]
             if missing:
+                # Use assign to avoid SettingWithCopyWarning
                 for m in missing:
-                    last_row[m] = 0.0
-            X = last_row[self.feature_names]
+                    target_df = target_df.assign(**{m: 0.0})
+            X = target_df[self.feature_names]
         else:
-            X = last_row.select_dtypes(include=[np.number])
+            X = target_df.select_dtypes(include=[np.number])
 
         # Predict Proba
         # Classes are usually [0, 1]. We want proba of class 1 (Buy).
         try:
             probs = self.model.predict_proba(X)
-            # probs is [[prob_0, prob_1]]
-            score = float(probs[0][1])
+            # probs is [[prob_0, prob_1], [prob_0, prob_1], ...]
+            if is_batch:
+                return probs[:, 1] # Return array of class 1 probabilities
+            else:
+                score = float(probs[0][1])
+                return score
         except AttributeError:
             # Fallback if predict_proba not supported (e.g. Regressor)
             pred = self.model.predict(X)
-            score = float(pred[0])
-            # Clip to 0-1 just in case
-            score = max(0.0, min(1.0, score))
-
-        return score
+            if is_batch:
+                return pred
+            else:
+                score = float(pred[0])
+                # Clip to 0-1 just in case
+                score = max(0.0, min(1.0, score))
+                return score

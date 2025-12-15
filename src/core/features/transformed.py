@@ -36,4 +36,11 @@ class TransformedFeatureBlock(FeatureBlock):
         # 3. Log Returns (Stationary Price Change)
         df["log_returns"] = np.log(df["close"] / df["close"].shift(1))
 
+        # 4. Aliases for ML Models (Legacy Compatibility)
+        if "atr" in df.columns:
+            df["volatility"] = df["atr"]
+        
+        if "dist_ema200" in df.columns:
+            df["ema_bias"] = df["dist_ema200"]
+
         return df

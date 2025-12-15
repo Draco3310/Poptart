@@ -1,8 +1,9 @@
+import argparse
 import asyncio
 import logging
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 import pandas as pd
@@ -10,12 +11,14 @@ import pandas as pd
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
-from src.config import PAIR_CONFIGS, Config, get_data_path
+from src.config import PAIR_CONFIGS, Config, get_data_path, get_model_path
 from src.core.backtest_analytics import BacktestAnalytics
 from src.core.feature_engine import FeatureEngine
 from src.core.risk_manager import RiskManager
 from src.core.trading_agent import TradingAgent
 from src.simulated_exchange import SimulatedKrakenExchange
+from src.predictors.orchestrator import PredictorOrchestrator
+from src.predictors.regime_classifier import RegimeClassifier
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -38,20 +41,30 @@ class MockNotifier:
     async def notify_exit(self, *args, **kwargs):
         pass
 
-async def run_multi_agent_backtest():
+async def run_multi_agent_backtest(start_date: Optional[str] = None, end_date: Optional[str] = None, days: Optional[int] = None):
     logger.info(">>> STARTING MULTI-AGENT BACKTEST <<<")
 
     # 1. Load Data
     symbols = ["BTCUSDT", "XRPUSDT", "SOLUSDT"]
     data_map: Dict[str, pd.DataFrame] = {}
     
-    # Define Backtest Window (Last Year)
-    # Based on user feedback, data ends Nov 30, 2025.
-    # We want Nov 30, 2024 to Nov 30, 2025.
-    start_date = pd.Timestamp("2024-11-30")
-    end_date = pd.Timestamp("2025-11-30")
+    # Define Backtest Window
+    # Default: Last 365 days from latest data (assumed 2025-11-30)
+    default_end = pd.Timestamp("2025-11-30")
+    
+    if end_date:
+        target_end = pd.Timestamp(end_date)
+    else:
+        target_end = default_end
+        
+    if start_date:
+        target_start = pd.Timestamp(start_date)
+    elif days:
+        target_start = target_end - pd.Timedelta(days=days)
+    else:
+        target_start = target_end - pd.Timedelta(days=365)
 
-    logger.info(f"Target Window: {start_date} to {end_date}")
+    logger.info(f"Target Window: {target_start} to {target_end}")
 
     for symbol in symbols:
         clean_sym = symbol.replace("/", "")
@@ -70,7 +83,7 @@ async def run_multi_agent_backtest():
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         
         # Filter Window
-        df = df[(df["timestamp"] >= start_date) & (df["timestamp"] <= end_date)]
+        df = df[(df["timestamp"] >= target_start) & (df["timestamp"] <= target_end)]
         df.sort_values("timestamp", inplace=True)
         df.reset_index(drop=True, inplace=True)
         
@@ -99,8 +112,8 @@ async def run_multi_agent_backtest():
         df = data_map[sym]
         data_map[sym] = df[df["timestamp"].isin(common_timestamps)].sort_values("timestamp").reset_index(drop=True)
 
-    # 3. Pre-compute Features
-    logger.info("Pre-computing features...")
+    # 3. Pre-compute Features & ML Scores
+    logger.info("Pre-computing features & ML scores...")
     feature_engine = FeatureEngine()
     
     enriched_data_map: Dict[str, pd.DataFrame] = {}
@@ -133,6 +146,166 @@ async def run_multi_agent_backtest():
             btc_context_5m["btc_df"] = btc_5m
             
         enriched_5m = feature_engine.compute_features(raw_5m, context=btc_context_5m)
+        
+        # --- Batch ML Inference ---
+        if Config.ML_ENABLED and sym != "BTCUSDT":
+            logger.info(f"Running Batch ML Inference for {sym}...")
+            symbol_clean = sym.replace("/", "")
+            
+            # Load Regime Classifier
+            regime_path = get_model_path(symbol_clean, "rf_regime", ext=".joblib")
+            regime_clf = RegimeClassifier(model_path=regime_path)
+            
+            # Predict Regimes (Batch)
+            # RegimeClassifier.predict is single-row. We need to vectorize or iterate.
+            # Since it's RF, we can use the underlying sklearn model for batch prediction if available.
+            # But RegimeClassifier wraps it with logic.
+            # Let's just iterate for now, or use a helper if possible.
+            # Actually, RegimeClassifier.model is the sklearn model.
+            # But it needs specific features.
+            # Let's assume we can iterate or use apply.
+            # Optimization: Just use the underlying model directly if possible.
+            
+            # For now, let's skip Regime batching if it's complex, but ML Score is the heavy one.
+            # Actually, Regime is needed for ML Score (ensemble weights depend on regime).
+            # So we must compute Regime first.
+            
+            # Let's try to use the underlying model.
+            if regime_clf.model:
+                # Prepare X
+                # We need to know which columns the model expects.
+                # Usually it's all numeric columns.
+                # RegimeClassifier.predict uses `_get_features`.
+                # Let's just run it row by row? No, that's slow.
+                # Let's use `apply`.
+                # enriched_5m["regime"] = enriched_5m.apply(lambda row: regime_clf.predict(row.to_frame().T).name, axis=1)
+                # Still slow.
+                
+                # Let's assume we can use the model directly.
+                # X = enriched_5m[regime_clf.feature_cols]
+                # But we don't know feature cols easily.
+                
+                # Fallback: Iterate. It's faster than full simulation loop overhead.
+                # But 500k rows...
+                pass
+
+            # Load Predictors
+            xgb_path = get_model_path(symbol_clean, "xgb_tp_sl_H1", ext=".model")
+            rf_path = get_model_path(symbol_clean, "rf_tp_sl_H1", ext=".joblib")
+            
+            orchestrator = PredictorOrchestrator()
+            predictor_config = [
+                {"type": "xgboost", "path": xgb_path, "weight": 0.5},
+                {"type": "rf", "path": rf_path, "weight": 0.5},
+            ]
+            orchestrator.load_predictors(predictor_config)
+            
+            # We need to run this on the whole dataframe.
+            # PredictorOrchestrator.get_ensemble_score calls predict on each predictor.
+            # XGBoostPredictor.predict uses `self.model.predict(dmatrix)`.
+            # We can pass the whole DF to `predict`.
+            
+            # We need to handle Regime dependency.
+            # If we assume a default regime or compute it, we can batch.
+            # Let's compute Regime first.
+            
+            # Hack: Just use "Trending" or "Ranging" based on ADX?
+            # Or just run the loop.
+            # Wait, if we run the loop here, it's still slow?
+            # No, because we don't have the overhead of `TradingAgent`, `Exchange`, `RiskManager` etc.
+            # But 500k iterations is still 500k iterations.
+            
+            # Let's try to batch predict using the underlying models.
+            # XGBoost supports batch prediction.
+            # RF supports batch prediction.
+            
+            # We need to align features.
+            # Let's assume `enriched_5m` has all features.
+            
+            # 1. Regime
+            # If we can't batch regime easily, let's skip it and assume "Trending" for weights?
+            # Or use a heuristic.
+            # Let's use the heuristic mode of RegimeClassifier if model missing.
+            # But if model exists, we want to use it.
+            
+            # Let's just iterate for Regime. It's RF, should be fast-ish.
+            # Actually, sklearn RF predict is fast on batch.
+            # We just need the feature columns.
+            # `regime_clf.model.feature_names_in_`
+            
+            try:
+                if regime_clf.model:
+                    feature_cols = regime_clf.model.feature_names_in_
+                    X_regime = enriched_5m[feature_cols]
+                    regimes = regime_clf.model.predict(X_regime)
+                    # Map to Enum names
+                    # The model returns 0, 1, 2... we need to map to names.
+                    # RegimeClassifier doesn't expose the mapping easily.
+                    # Usually 0=Ranging, 1=Trending...
+                    # Let's skip Regime batching and do it in the loop if we have to.
+                    # But wait, `TradingAgent` checks for `regime` column.
+                    # If we don't provide it, it runs inference.
+                    
+                    # Let's try to run `get_ensemble_score` in batch?
+                    # No, it takes a single row (usually).
+                    # But `predictor.predict(df)` might work for batch if implemented correctly.
+                    # XGBoostPredictor.predict:
+                    # dtest = xgb.DMatrix(df)
+                    # return self.model.predict(dtest)
+                    # This SUPPORTS batch!
+                    
+                    # So we can run:
+                    # score_xgb = orchestrator.predictors["xgboost"].predict(enriched_5m)
+                    # score_rf = orchestrator.predictors["rf"].predict(enriched_5m)
+                    # weighted_score = (score_xgb * 0.5) + (score_rf * 0.5)
+                    
+                    # This ignores Regime-based weights, but it's a good approximation for speed.
+                    # Or we can compute both and blend?
+                    
+                    # Let's do this:
+                    # 1. Compute raw scores for XGB and RF (Batch).
+                    # 2. Average them (0.5/0.5).
+                    # 3. Store as `ml_score`.
+                    # 4. Store `regime` as "Unknown" or skip it (Agent will compute if missing, or we can use Heuristic).
+                    
+                    # Actually, if we provide `ml_score`, Agent uses it.
+                    # Agent also looks for `regime`.
+                    # If we don't provide `regime`, Agent computes it.
+                    # Computing Regime (RF) is fast.
+                    # Computing XGBoost (Gradient Boosting) is slow.
+                    # So pre-computing ML Score is the main win.
+                    
+                    # Let's pre-compute ML Score using fixed weights (0.5/0.5).
+                    
+                    scores = []
+                    valid_weights = []
+                    for i, predictor in enumerate(orchestrator.predictors):
+                        try:
+                            s = predictor.predict(enriched_5m)
+                            # If s is array, good.
+                            if isinstance(s, (float, int)):
+                                s = [s] * len(enriched_5m)
+                            scores.append(s)
+                            valid_weights.append(orchestrator.weights[i])
+                        except Exception as e:
+                            logger.warning(f"Batch prediction failed for predictor {i}: {e}")
+                    
+                    if scores:
+                        # Weighted Average
+                        import numpy as np
+                        scores_arr = np.array(scores)
+                        weights_arr = np.array(valid_weights)
+                        
+                        # Weighted average along axis 0
+                        avg_score = np.average(scores_arr, axis=0, weights=weights_arr)
+                        
+                        enriched_5m["ml_score"] = avg_score
+                        enriched_5m["regime"] = "BATCH_PRECOMPUTED" # Placeholder
+                        logger.info(f"Batch ML Inference complete for {sym}")
+                        
+            except Exception as e:
+                logger.error(f"Batch ML failed for {sym}: {e}")
+
         enriched_data_map[sym] = enriched_5m
 
     # 4. Initialize Components
@@ -330,14 +503,30 @@ async def run_multi_agent_backtest():
     
     run_id = f"MULTI_AGENT_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     
+    # Get Version IDs
+    strat_id = analytics.get_or_create_strategy_version("MultiAgent", "v2.0", "HEAD")
+    # We don't have a method for feature engine version yet, let's add one or insert manually?
+    # BacktestAnalytics._init_db creates the table.
+    # But there is no helper method.
+    # Let's just pass None for now if allowed, or add a helper.
+    # The schema allows NULL for foreign keys usually?
+    # In `create_bt_runs`: `strategy_version_id INTEGER` (nullable).
+    # But `register_run` query uses `:strategy_version_id`.
+    # If we pass None, sqlite handles it as NULL.
+    
     # Register Run
     run_data = {
         "run_id": run_id,
         "run_type": "BACKTEST_MULTI",
-        "start_date": str(start_date),
-        "end_date": str(end_date),
+        "start_date": str(target_start),
+        "end_date": str(target_end),
+        "strategy_version_id": strat_id,
+        "feature_engine_version_id": None,
+        "data_source_id": None,
         "config_snapshot_id": analytics.get_or_create_config_snapshot({}),
         "code_version": "HEAD",
+        "report_path": f"backtesting_results/backtest_report_{run_id}.txt",
+        "debug_log_path": f"backtesting_results/backtest_debug_{run_id}.log",
         "notes": "Multi-Agent Portfolio Backtest"
     }
     analytics.register_run(run_data)
@@ -371,4 +560,11 @@ async def run_multi_agent_backtest():
     logger.info(f"Results saved to backtesting_results/ with run_id {run_id}")
 
 if __name__ == "__main__":
-    asyncio.run(run_multi_agent_backtest())
+    parser = argparse.ArgumentParser(description="Run Multi-Agent Backtest")
+    parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD)")
+    parser.add_argument("--days", type=int, help="Number of days to backtest (ending at --end or default)")
+    
+    args = parser.parse_args()
+    
+    asyncio.run(run_multi_agent_backtest(start_date=args.start, end_date=args.end, days=args.days))

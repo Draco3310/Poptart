@@ -33,6 +33,7 @@ class TradingAgent:
         self.exchange = exchange
         self.notifier = notifier
         self.risk_manager = risk_manager
+        self.logger = logging.getLogger(f"Agent-{self.symbol}")
 
         # dedicated components
         self.feature_engine = FeatureEngine()
@@ -46,12 +47,14 @@ class TradingAgent:
         self.historic_btc_data = pd.DataFrame() # For context
         self.last_dca_time: Optional[pd.Timestamp] = None
 
-        self.logger = logging.getLogger(f"Agent-{self.symbol}")
-
     def _init_strategy_selector(self) -> StrategySelector:
         """Initializes the strategy selector with pair-specific models."""
         symbol_clean = self.symbol.replace("/", "")
         regime_path = get_model_path(symbol_clean, "rf_regime", ext=".joblib")
+
+        # Skip Regime Model for BTC (SmartDCA doesn't use it)
+        if "BTC" in self.symbol:
+            regime_path = None
 
         if not Config.ML_ENABLED:
             regime_path = None
@@ -61,6 +64,10 @@ class TradingAgent:
     def _init_predictors(self) -> PredictorOrchestrator:
         """Initializes ML predictors for this pair."""
         orchestrator = PredictorOrchestrator()
+
+        # Skip ML for BTC/USDT as it uses SmartDCA
+        if "BTC" in self.symbol:
+            return orchestrator
 
         if Config.ML_ENABLED:
             symbol_clean = self.symbol.replace("/", "")
@@ -200,15 +207,25 @@ class TradingAgent:
         Separated for easier backtesting with pre-computed features.
         """
         # 1. Regime & ML
-        regime_enum = self.strategy_selector.regime_classifier.predict(
-            enriched_data, self.strategy_selector.last_regime
-        )
-        self.strategy_selector.last_regime = regime_enum
-        regime_name = regime_enum.name
+        # Check for pre-computed values (Optimization)
+        if "regime" in enriched_data.columns and "ml_score" in enriched_data.columns:
+            # Use the last row's pre-computed values
+            last_row = enriched_data.iloc[-1]
+            regime_name = last_row["regime"]
+            ml_score = last_row["ml_score"]
+            # Update state for consistency
+            # self.strategy_selector.last_regime = ... (Enum conversion needed if we use it elsewhere)
+        else:
+            # Real-time Inference
+            regime_enum = self.strategy_selector.regime_classifier.predict(
+                enriched_data, self.strategy_selector.last_regime
+            )
+            self.strategy_selector.last_regime = regime_enum
+            regime_name = regime_enum.name
 
-        ml_score = None
-        if Config.ML_ENABLED:
-            ml_score = self.predictor_orchestrator.get_ensemble_score(enriched_data, regime=regime_name)
+            ml_score = None
+            if Config.ML_ENABLED:
+                ml_score = self.predictor_orchestrator.get_ensemble_score(enriched_data, regime=regime_name)
 
         # 2. Strategy Analysis
         dca_config = {}
@@ -359,6 +376,10 @@ class TradingAgent:
 
             sl_dist = atr * Config.ATR_MULTIPLIER
             stop_loss = current_price - sl_dist
+            
+            # Disable SL for DCA Mode
+            if self.config.enable_dca_mode:
+                stop_loss = 0.0
 
             if self.position and self.config.enable_dca_mode:
                 # Accumulate

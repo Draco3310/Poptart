@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -50,7 +50,7 @@ class XGBoostPredictor(BasePredictor):
             logger.error(f"Failed to load XGBoost model: {e}")
             raise
 
-    def predict(self, enriched_df: pd.DataFrame) -> float:
+    def predict(self, enriched_df: pd.DataFrame) -> Any:
         if not self.model:
             raise RuntimeError("Model not loaded. Call load_model() first.")
 
@@ -59,26 +59,42 @@ class XGBoostPredictor(BasePredictor):
         except ImportError:
             raise RuntimeError("XGBoost not installed.")
 
-        # Get the last row
-        last_row = enriched_df.iloc[[-1]]
+        # Determine if Batch or Single Row
+        # If called from TradingAgent, it passes a slice (usually 50 rows), but we only want the last one.
+        # If called from Backtest Batch, we want all rows.
+        # Heuristic: If > 100 rows, assume Batch?
+        # Or better: The caller should handle slicing.
+        # But TradingAgent passes a lookback window (50 rows).
+        # So for TradingAgent, we MUST take the last row.
+        # For Batch Backtest, we pass 500k rows.
+        
+        target_df = enriched_df
+        is_batch = len(enriched_df) > 200 # Arbitrary threshold to distinguish lookback from full history
+
+        if not is_batch:
+            target_df = enriched_df.iloc[[-1]]
 
         # Ensure we select only the features the model expects, if known
         if self.feature_names:
             # Check if all features exist
-            missing = [f for f in self.feature_names if f not in last_row.columns]
+            missing = [f for f in self.feature_names if f not in target_df.columns]
             if missing:
                 logger.warning(f"Missing features for XGBoost: {missing}. Filling with 0.")
+                # Use assign to avoid SettingWithCopyWarning on slice
                 for m in missing:
-                    last_row[m] = 0.0
+                    target_df = target_df.assign(**{m: 0.0})
 
-            X = last_row[self.feature_names]
+            X = target_df[self.feature_names]
         else:
             # If no feature names known, use all numeric columns
-            X = last_row.select_dtypes(include=[np.number])
+            X = target_df.select_dtypes(include=[np.number])
 
         dtest = xgb.DMatrix(X)
         prediction = self.model.predict(dtest)
 
-        # Prediction is typically a numpy array
-        score = float(prediction[0])
-        return score
+        if is_batch:
+            return prediction # Returns numpy array
+        else:
+            # Prediction is typically a numpy array
+            score = float(prediction[0])
+            return score
