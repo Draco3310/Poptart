@@ -295,10 +295,10 @@ if __name__ == "__main__":
     }
 
     strategy_grid: Dict[str, List[Any]] = {
-        "EMA_PERIOD_FAST": [15, 20, 25],
-        "EMA_PERIOD_SLOW": [180, 200, 220],
-        "ADX_THRESHOLD": [28, 30, 35],
-        "ATR_MULTIPLIER": [2.8, 3.0, 3.5],
+        "ema_period_fast": [15, 20, 25],
+        "ema_period_slow": [180, 200, 220],
+        "adx_threshold": [28, 30, 35],
+        "atr_multiplier": [2.8, 3.0, 3.5],
     }
 
     # Select Grid based on Config
