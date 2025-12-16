@@ -3,6 +3,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
+from src.config import PairConfig
 from src.predictors.regime_classifier import MarketRegime, RegimeClassifier
 from src.strategies.btc_smart_dca import BTCSmartDCAStrategy
 from src.strategies.mean_reversion_mtf import MeanReversionStrategy
@@ -40,6 +41,7 @@ class StrategySelector:
     def analyze(
         self,
         df: pd.DataFrame,
+        pair_config: PairConfig,
         ml_score: Optional[float] = None,
         confirm_df: Optional[pd.DataFrame] = None,
         l2_features: Optional[Dict[str, float]] = None,
@@ -61,7 +63,7 @@ class StrategySelector:
         """
         # 0. DCA Mode Bypass
         if enable_dca_mode and dca_config:
-            return self.btc_dca.analyze(df, current_price, current_balance_btc, current_equity_usdt, dca_config)
+            return self.btc_dca.analyze(df, current_price, current_balance_btc, current_equity_usdt, pair_config, dca_config)
 
         # 1. Detect Regime
         regime_name = "UNKNOWN"
@@ -109,7 +111,7 @@ class StrategySelector:
         if regime_name == "RANGE":
             # Priority 1: Mean Reversion (if enabled)
             if enable_mean_reversion:
-                result = self.mean_reversion.analyze(df, ml_score, confirm_df, l2_features, **kwargs)
+                result = self.mean_reversion.analyze(df, pair_config, ml_score, confirm_df, l2_features, **kwargs)
                 result["active_strategy"] = "MeanReversion"
 
             # Priority 2: Trend Following (Breakout) if MR failed or disabled
@@ -131,13 +133,13 @@ class StrategySelector:
         elif regime_name == "TREND":
             # Priority 1: Trend Following (if enabled)
             if enable_trend_following:
-                result = self.trend_following.analyze(df, ml_score, confirm_df, l2_features, **kwargs)
+                result = self.trend_following.analyze(df, pair_config, ml_score, confirm_df, l2_features, **kwargs)
                 result["active_strategy"] = "TrendFollowing"
 
             # Priority 2: Mean Reversion (Sniper) if TF failed or disabled
             if not result["signal"] and enable_mean_reversion:
                 # We pass regime="TREND" so MR knows to apply strict sniper rules
-                mr_result = self.mean_reversion.analyze(df, ml_score, confirm_df, l2_features, regime="TREND", **kwargs)
+                mr_result = self.mean_reversion.analyze(df, pair_config, ml_score, confirm_df, l2_features, regime="TREND", **kwargs)
                 if mr_result["signal"]:
                     result = mr_result
                     result["active_strategy"] = "MeanReversion"
@@ -149,13 +151,22 @@ class StrategySelector:
         elif regime_name == "CRASH":
             # Defensive Mode: No Longs
             # Let Mean Reversion handle it (it blocks longs in CRASH)
-            result = self.mean_reversion.analyze(df, ml_score, confirm_df, l2_features, regime="CRASH", **kwargs)
+            result = self.mean_reversion.analyze(df, pair_config, ml_score, confirm_df, l2_features, regime="CRASH", **kwargs)
             result["active_strategy"] = "MeanReversion"
 
         # Ensure decision context has regime
         if "decision_context" not in result:
             result["decision_context"] = {}
         result["decision_context"]["regime"] = regime_name
+
+        # Inject Timestamp if missing
+        if "timestamp" not in result:
+            if "timestamp" in df.columns:
+                result["timestamp"] = df.iloc[-1]["timestamp"]
+            elif isinstance(df.index, pd.DatetimeIndex):
+                result["timestamp"] = df.index[-1]
+            else:
+                result["timestamp"] = pd.Timestamp.now()
 
         return result
 
@@ -164,6 +175,7 @@ class StrategySelector:
         balance: float,
         entry_price: float,
         atr: float,
+        pair_config: PairConfig,
         multiplier: float = 1.0,
         regime: str = "CHOP",
     ) -> float:
@@ -183,4 +195,4 @@ class StrategySelector:
         # Ideally, analyze() returns the strategy instance or we store it in self.active_strategy
 
         # Simplified: Use Mean Reversion's calculator (it's robust)
-        return self.mean_reversion.calculate_position_size(balance, entry_price, atr, multiplier)
+        return self.mean_reversion.calculate_position_size(balance, entry_price, atr, pair_config, multiplier)

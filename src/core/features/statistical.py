@@ -53,6 +53,10 @@ class StatisticalFeatureBlock(FeatureBlock):
     Adds statistical features to detect market regimes (Trend vs Mean Reversion).
     Includes Hurst Exponent and Autocorrelation.
     """
+    
+    # Configurable windows (can be overridden via context if needed in future)
+    AUTOCORR_WINDOW = 20
+    HURST_WINDOW = 100
 
     def apply(self, df: pd.DataFrame, context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         if df.empty:
@@ -62,9 +66,8 @@ class StatisticalFeatureBlock(FeatureBlock):
 
         # 1. Rolling Autocorrelation (Lag 1)
         # Positive = Trend, Negative = Mean Reversion
-        window = 20
         # Optimized: Use rolling correlation with shifted series instead of .apply()
-        df["autocorr_20"] = df["close"].rolling(window=window).corr(df["close"].shift(1))
+        df[f"autocorr_{self.AUTOCORR_WINDOW}"] = df["close"].rolling(window=self.AUTOCORR_WINDOW).corr(df["close"].shift(1))
 
         # 2. Hurst Exponent (Rolling)
         # H < 0.5 = Mean Reversion, H > 0.5 = Trend
@@ -72,19 +75,23 @@ class StatisticalFeatureBlock(FeatureBlock):
         # To maintain performance, we use a simplified R/S analysis or a smaller window.
         # Here we implement a rolling calculation using the standard deviation of differences (simplified).
 
-        # Note: Real R/S analysis is O(N^2) or O(N log N). For a rolling window of 100 on 5m data:
-        # We can use a helper function.
+        # Note: Real R/S analysis is O(N^2) or O(N log N).
+        # Note: Hurst sensitivity depends on window size. 100 bars on 1m is different from 100 bars on 5m.
+        # We stick to 100 bars as a statistical minimum for R/S analysis validity.
 
-        hurst_window = 100
-        # Use Numba-optimized function
-        # engine='numba', engine_kwargs={'nopython': True, 'nogil': True} is supported in recent pandas
-        # But .apply(func, raw=True) with a numba-jitted func is also fast.
-        df["hurst_exponent"] = df["close"].rolling(window=hurst_window).apply(calculate_hurst_numba, raw=True)
+        # Use Numba-optimized rolling apply
+        # engine='numba' compiles the loop, avoiding Python overhead per window
+        df["hurst_exponent"] = df["close"].rolling(window=self.HURST_WINDOW).apply(
+            calculate_hurst_numba,
+            raw=True,
+            engine="numba",
+            engine_kwargs={"nopython": True, "parallel": False},
+        )
 
         # Keep Efficiency Ratio as a faster, complementary metric
         change = df["close"].diff().abs()
-        net_change = (df["close"] - df["close"].shift(window)).abs()
-        sum_change = change.rolling(window=window).sum()
+        net_change = (df["close"] - df["close"].shift(self.AUTOCORR_WINDOW)).abs()
+        sum_change = change.rolling(window=self.AUTOCORR_WINDOW).sum()
         df["efficiency_ratio"] = net_change / sum_change.replace(0, np.nan)
 
         return df

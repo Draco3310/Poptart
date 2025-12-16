@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import sys
@@ -9,10 +10,12 @@ import pandas as pd
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
-from src.config import PAIR_CONFIGS, PairConfig, get_data_path
+from src.config import PAIR_CONFIGS, Config, PairConfig, get_data_path
 from src.core.backtest_analytics import BacktestAnalytics
-from src.core.backtest_engine import BacktestEngine
+from src.core.async_backtest_engine import AsyncBacktestEngine
 from src.core.backtest_result import BacktestResult
+from src.core.trading_agent import TradingAgent
+from src.core.risk_manager import RiskManager
 from src.simulated_exchange import SimulatedKrakenExchange
 
 # Setup Logging
@@ -26,50 +29,89 @@ logger.setLevel(logging.INFO)
 
 def run_backtest(
     pair_config: PairConfig, start_date: Optional[str] = None, end_date: Optional[str] = None, log_to_db: bool = True
-) -> BacktestResult:
+) -> None:
     """
-    Orchestrates a single backtest run using the BacktestEngine.
+    Orchestrates a single backtest run using the AsyncBacktestEngine.
     Handles reporting and database ingestion.
     """
     logger.info(f"Starting Backtest for {pair_config.symbol} ({start_date} to {end_date})...")
+    
+    asyncio.run(_run_async_backtest(pair_config, start_date, end_date, log_to_db))
 
-    # 1. Load BTC Data (Context) if not running BTC
-    btc_data = None
+async def _run_async_backtest(
+    pair_config: PairConfig, start_date: Optional[str], end_date: Optional[str], log_to_db: bool
+) -> None:
+    # 1. Load Data
+    data_path = get_data_path(pair_config.symbol, "1m")
+    if not os.path.exists(data_path):
+        logger.error(f"Data not found: {data_path}")
+        return
+
+    df = pd.read_csv(data_path)
+    # Normalize columns
+    df.columns = [c.lower().strip() for c in df.columns]
+    if "open_time" in df.columns and "timestamp" not in df.columns:
+        df.rename(columns={"open_time": "timestamp"}, inplace=True)
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"])
+        df.sort_values("timestamp", inplace=True)
+    
+    # Filter Date
+    if start_date:
+        df = df[df["timestamp"] >= pd.to_datetime(start_date)]
+    if end_date:
+        df = df[df["timestamp"] <= pd.to_datetime(end_date)]
+    
+    df.reset_index(drop=True, inplace=True)
+    
+    if df.empty:
+        logger.error("No data in date range.")
+        return
+
+    data_map = {pair_config.symbol: df}
+    
+    # Load BTC Context if needed
     if pair_config.symbol != "BTCUSDT":
-        try:
-            btc_path = get_data_path("BTCUSDT", "1m")
-            if os.path.exists(btc_path):
-                logger.info(f"Loading BTC Context from {btc_path}...")
-                # Use SimulatedKrakenExchange to load and clean data
-                btc_exchange = SimulatedKrakenExchange(str(btc_path))
-                btc_data = btc_exchange.data
-            else:
-                logger.warning("BTC Data not found. Running without BTC Context.")
-        except Exception as e:
-            logger.error(f"Failed to load BTC Context: {e}")
-
-    # 2. Run Engine
-    engine = BacktestEngine(pair_config, btc_data=btc_data)
-    result = engine.run(start_date, end_date)
-
-    if result.run_id == "failed":
-        logger.error("Backtest failed.")
-        return result
-
-    # 2. Generate Reports
-    _generate_reports(result)
-
-    # 3. Ingest to Database
-    if log_to_db:
-        _ingest_to_db(result)
-
-    return result
+        btc_path = get_data_path("BTCUSDT", "1m")
+        if os.path.exists(btc_path):
+            btc_df = pd.read_csv(btc_path)
+            btc_df.columns = [c.lower().strip() for c in btc_df.columns]
+            if "open_time" in btc_df.columns and "timestamp" not in btc_df.columns:
+                btc_df.rename(columns={"open_time": "timestamp"}, inplace=True)
+            btc_df["timestamp"] = pd.to_datetime(btc_df["timestamp"])
+            btc_df.sort_values("timestamp", inplace=True)
+            
+            # Align BTC data to simulation window
+            btc_df = btc_df[(btc_df["timestamp"] >= df["timestamp"].min()) & (btc_df["timestamp"] <= df["timestamp"].max())]
+            data_map["BTC/USDT"] = btc_df # AsyncEngine expects BTC/USDT for context
+            
+    # 2. Initialize Components
+    exchange = SimulatedKrakenExchange(data_map, initial_balance=10000.0)
+    risk_manager = RiskManager()
+    
+    # Mock Notifier
+    class MockNotifier:
+        async def send_message(self, msg): pass
+        async def notify_entry(self, *args, **kwargs): pass
+        async def notify_exit(self, *args, **kwargs): pass
+        
+    notifier = MockNotifier()
+    
+    agent = TradingAgent(pair_config, exchange, notifier, risk_manager) # type: ignore
+    
+    engine = AsyncBacktestEngine([agent], exchange)
+    
+    # 3. Run
+    await engine.precompute_features()
+    await engine.run()
+    
+    # Reports are generated by AsyncBacktestEngine._finalize_run
 
 
 def _generate_reports(result: BacktestResult) -> None:
     """Generates Console, TXT, and CSV reports."""
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_dir = "backtesting_results"
+    results_dir = Config.BACKTEST_RESULTS_DIR
     os.makedirs(results_dir, exist_ok=True)
 
     report_file = os.path.join(results_dir, f"backtest_report_{result.pair}_{timestamp_str}.txt")
@@ -169,8 +211,46 @@ def get_data_range(pair_config: PairConfig) -> tuple[Optional[pd.Timestamp], Opt
         return None, None
 
     try:
-        temp_exchange = SimulatedKrakenExchange(data_path)
-        return temp_exchange.data["timestamp"].min(), temp_exchange.data["timestamp"].max()
+        # Optimized: Read first and last rows only instead of full load
+        # 1. Read first row (header + 1st data)
+        df_start = pd.read_csv(data_path, nrows=1)
+        
+        # Normalize columns
+        if "timestamp" not in df_start.columns and "open_time" in df_start.columns:
+             df_start.rename(columns={"open_time": "timestamp"}, inplace=True)
+        
+        # Handle headerless (Kraken format)
+        if "timestamp" not in df_start.columns:
+             # Assume first col is timestamp
+             start_ts = df_start.iloc[0, 0]
+        else:
+             start_ts = df_start.iloc[0]["timestamp"]
+
+        # 2. Read last row (using seek)
+        with open(data_path, 'rb') as f:
+            try:
+                f.seek(-1024, os.SEEK_END)
+            except OSError:
+                # File too small
+                f.seek(0)
+            last_line = f.readlines()[-1].decode()
+        
+        # Parse last line
+        last_vals = last_line.strip().split(',')
+        end_ts = last_vals[0] # Timestamp is usually first
+
+        # Convert
+        def parse_ts(val):
+            try:
+                val_float = float(val)
+                if val_float > 30000000000: # ms
+                    return pd.to_datetime(val_float, unit='ms')
+                return pd.to_datetime(val_float, unit='s')
+            except:
+                return pd.to_datetime(val)
+
+        return parse_ts(start_ts), parse_ts(end_ts)
+
     except Exception as e:
         logger.error(f"Failed to get data range for {pair_config.symbol}: {e}")
         return None, None

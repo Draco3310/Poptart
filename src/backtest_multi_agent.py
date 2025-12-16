@@ -281,10 +281,8 @@ async def run_multi_agent_backtest(start_date: Optional[str] = None, end_date: O
                     valid_weights = []
                     for i, predictor in enumerate(orchestrator.predictors):
                         try:
-                            s = predictor.predict(enriched_5m)
-                            # If s is array, good.
-                            if isinstance(s, (float, int)):
-                                s = [s] * len(enriched_5m)
+                            # Use predict_batch explicitly
+                            s = predictor.predict_batch(enriched_5m)
                             scores.append(s)
                             valid_weights.append(orchestrator.weights[i])
                         except Exception as e:

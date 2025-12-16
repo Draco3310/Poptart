@@ -21,7 +21,9 @@ class MicrostructureFeatureBlock(FeatureBlock):
         # 1. Volume Imbalance Proxy
         # (Close - Open) / (High - Low) * Volume
         # Range: -Volume (Full Bear) to +Volume (Full Bull)
-        range_hl = (df["high"] - df["low"]).replace(0, np.nan)
+        epsilon = 1e-9
+        high_low = df["high"] - df["low"]
+        range_hl = high_low.replace(0, np.nan)
         df["volume_imbalance"] = ((df["close"] - df["open"]) / range_hl) * df["volume"]
 
         # 2. VPIN Proxy (Volume-Synchronized Probability of Informed Trading)
@@ -33,17 +35,17 @@ class MicrostructureFeatureBlock(FeatureBlock):
         price_change_pct = df["close"].pct_change(fill_method=None).abs()
         toxic_flow = df["volume"] * price_change_pct
 
-        window = 20
-        total_volume = df["volume"].rolling(window=window).sum()
-        total_toxic = toxic_flow.rolling(window=window).sum()
+        # Use time-based window for consistency across timeframes
+        window_time = '1h'
+        total_volume = df["volume"].rolling(window=window_time).sum()
+        total_toxic = toxic_flow.rolling(window=window_time).sum()
 
         df["vpin_proxy"] = total_toxic / total_volume.replace(0, np.nan)
 
         # 3. Candle Shape Features
         # Measures of wick/body proportions to detect rejection/exhaustion.
         # Epsilon to avoid division by zero
-        epsilon = 1e-9
-        candle_range = (df["high"] - df["low"]) + epsilon
+        candle_range = high_low + epsilon
         body_size = (df["close"] - df["open"]).abs()
         upper_wick = df["high"] - df[["open", "close"]].max(axis=1)
         lower_wick = df[["open", "close"]].min(axis=1) - df["low"]
@@ -55,10 +57,11 @@ class MicrostructureFeatureBlock(FeatureBlock):
 
         # 4. Range & Volatility Features
         # Detect range expansion/compression relative to history.
-        window_range = 20
-        true_range = df["high"] - df["low"]  # Simple TR for now
-        rolling_mean_tr = true_range.rolling(window=window_range).mean()
-        rolling_std_tr = true_range.rolling(window=window_range).std()
+        window_range = 20 # Keep integer window for Z-Score to ensure statistical significance (N samples)
+        true_range = high_low  # Simple TR for now
+        r_tr = true_range.rolling(window=window_range)
+        rolling_mean_tr = r_tr.mean()
+        rolling_std_tr = r_tr.std()
 
         df[f"ms_range_zscore_{window_range}"] = (true_range - rolling_mean_tr) / (rolling_std_tr + epsilon)
 
@@ -80,8 +83,9 @@ class MicrostructureFeatureBlock(FeatureBlock):
         # 5. Volume Features
         # Detect volume spikes and efficiency.
         window_vol = 20
-        rolling_mean_vol = df["volume"].rolling(window=window_vol).mean()
-        rolling_std_vol = df["volume"].rolling(window=window_vol).std()
+        r_vol = df["volume"].rolling(window=window_vol)
+        rolling_mean_vol = r_vol.mean()
+        rolling_std_vol = r_vol.std()
 
         df[f"vol_zscore_{window_vol}"] = (df["volume"] - rolling_mean_vol) / (rolling_std_vol + epsilon)
 
@@ -91,9 +95,10 @@ class MicrostructureFeatureBlock(FeatureBlock):
         # Volume per unit of range (Liquidity/Absorption proxy)
         df["vol_per_range"] = df["volume"] / candle_range
 
-        # 6. VWAP & Value Area Proxies (Rolling 24h = 288 bars @ 5m)
+        # 6. VWAP & Value Area Proxies (Rolling 24h)
         # Efficient calculation of Rolling VWAP
-        window_vwap = 288
+        # Use time-based rolling to support any timeframe
+        window_vwap = '24h'
 
         # Typical Price
         tp = (df["high"] + df["low"] + df["close"]) / 3
@@ -110,14 +115,19 @@ class MicrostructureFeatureBlock(FeatureBlock):
         else:
             df["dist_to_vwap_pct"] = (df["close"] - df["vwap_24h"]) / df["vwap_24h"]
 
-        # VWAP Bands (Proxy for Value Area)
-        # We need rolling standard deviation of price relative to VWAP?
-        # Or just standard deviation of Close?
-        # Standard VWAP bands use std dev of the *price* distribution.
-        # Approximation: Rolling Std Dev of Close * 2
-        rolling_std_close = df["close"].rolling(window=window_vwap).std()
-        df["vwap_upper"] = df["vwap_24h"] + (2.0 * rolling_std_close)
-        df["vwap_lower"] = df["vwap_24h"] - (2.0 * rolling_std_close)
+        # VWAP Bands (Standard Deviation of Price Volume Distribution)
+        # StdDev = sqrt( VWAP(Price^2) - VWAP(Price)^2 )
+        tp_sq_vol = (tp ** 2) * df["volume"]
+        rolling_tp_sq_vol = tp_sq_vol.rolling(window=window_vwap).sum()
+        
+        vwap_sq = rolling_tp_sq_vol / rolling_vol.replace(0, np.nan)
+        # Variance = E[X^2] - (E[X])^2
+        # Ensure non-negative (floating point errors)
+        variance = (vwap_sq - (df["vwap_24h"] ** 2)).clip(lower=0)
+        vwap_std = np.sqrt(variance)
+
+        df["vwap_upper"] = df["vwap_24h"] + (2.0 * vwap_std)
+        df["vwap_lower"] = df["vwap_24h"] - (2.0 * vwap_std)
 
         # Feature: Position within VWAP Bands (0.0 = Lower, 0.5 = VWAP, 1.0 = Upper)
         vwap_range = df["vwap_upper"] - df["vwap_lower"]

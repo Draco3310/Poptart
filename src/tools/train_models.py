@@ -16,53 +16,11 @@ sys.path.append(os.getcwd())
 
 from src.config import get_data_path, get_model_path
 from src.core.feature_engine import FeatureEngine
+from src.utils.data_loader import load_data
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("Trainer")
-
-
-def load_data(filepath: str) -> pd.DataFrame:
-    logger.info(f"Loading data from {filepath}...")
-
-    # Check for header
-    peek = pd.read_csv(filepath, nrows=1, header=None)
-    first_val = str(peek.iloc[0, 0])
-
-    if "timestamp" in first_val.lower() or "open_time" in first_val.lower():
-        # Has header
-        df = pd.read_csv(filepath)
-        # Normalize columns
-        df.columns = [c.lower().strip() for c in df.columns]
-
-        # Map 'open_time' to 'timestamp' if needed
-        if "open_time" in df.columns and "timestamp" not in df.columns:
-            df.rename(columns={"open_time": "timestamp"}, inplace=True)
-
-    else:
-        # No header, assume Kraken format
-        df = pd.read_csv(filepath, header=None, names=["timestamp", "open", "high", "low", "close", "volume", "trades"])
-
-    # Downcast numeric columns to float32
-    numeric_cols = ["open", "high", "low", "close", "volume"]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = df[col].astype("float32")
-
-    # Convert timestamp
-    # Check if it's already datetime
-    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
-        # Check if it's ms or s
-        if df["timestamp"].max() > 30000000000:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        else:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
-
-    df.set_index("timestamp", inplace=True)
-    df.sort_index(inplace=True)
-
-    logger.info(f"Loaded {len(df)} rows.")
-    return df
 
 
 def prepare_features(df: pd.DataFrame) -> pd.DataFrame:

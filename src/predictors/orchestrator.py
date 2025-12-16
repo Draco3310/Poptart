@@ -4,9 +4,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from src.predictors.base_predictor import BasePredictor
-from src.predictors.lstm_model import LSTMPredictor
-from src.predictors.random_forest import RandomForestPredictor
-from src.predictors.xgboost_model import XGBoostPredictor
+from src.predictors.factory import PredictorFactory
 
 logger = logging.getLogger(__name__)
 
@@ -42,23 +40,19 @@ class PredictorOrchestrator:
             path = cfg.get("path")
             weight = cfg.get("weight", 1.0)
 
-            predictor: Optional[BasePredictor] = None
-            try:
-                if p_type == "xgboost" or p_type == "xgb":
-                    predictor = XGBoostPredictor()
-                elif p_type == "lstm":
-                    predictor = LSTMPredictor()
-                elif p_type == "rf":
-                    predictor = RandomForestPredictor()
-                else:
-                    logger.warning(f"Unknown predictor type: {p_type}")
-                    continue
+            if not p_type:
+                continue
 
+            try:
+                predictor = PredictorFactory.create_predictor(p_type)
+                
                 if predictor and path:
                     predictor.load_model(path)
                     self.predictors.append(predictor)
                     self.weights.append(weight)
                     logger.info(f"Loaded {p_type} predictor from {path} with weight {weight}")
+                elif not predictor:
+                    logger.warning(f"Failed to create predictor of type: {p_type}")
 
             except Exception as e:
                 logger.error(f"Failed to load predictor {p_type} from {path}: {e}")
@@ -78,7 +72,8 @@ class PredictorOrchestrator:
 
         for i, predictor in enumerate(self.predictors):
             try:
-                score = predictor.predict(enriched_df)
+                # Use predict_single for live inference
+                score = predictor.predict_single(enriched_df)
                 scores.append(score)
 
                 # Dynamic Weighting based on Regime

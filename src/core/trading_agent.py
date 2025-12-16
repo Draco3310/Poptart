@@ -5,9 +5,10 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from src.config import Config, PairConfig, get_model_path
+from src.config import Config, PairConfig, get_data_path, get_model_path
 from src.core.feature_engine import FeatureEngine
 from src.core.risk_manager import RiskManager
+from src.database import Database
 from src.exchange import KrakenExchange
 from src.notifier import TelegramNotifier
 from src.predictors.orchestrator import PredictorOrchestrator
@@ -26,13 +27,17 @@ class TradingAgent:
         pair_config: PairConfig,
         exchange: KrakenExchange,
         notifier: TelegramNotifier,
-        risk_manager: RiskManager
+        risk_manager: RiskManager,
+        db: Optional[Database] = None,
+        run_id: Optional[str] = None
     ):
         self.config = pair_config
         self.symbol = pair_config.symbol
         self.exchange = exchange
         self.notifier = notifier
         self.risk_manager = risk_manager
+        self.db = db
+        self.run_id = run_id
         self.logger = logging.getLogger(f"Agent-{self.symbol}")
 
         # dedicated components
@@ -112,25 +117,37 @@ class TradingAgent:
                 limit=3000
             )
 
-            # Merge with Historic
+            # Merge with Historic (Optimized Rolling Buffer)
             if not self.historic_data.empty:
-                combined = pd.concat([self.historic_data, raw_data])
-                combined.drop_duplicates(subset="timestamp", keep="last", inplace=True)
-                combined.sort_values("timestamp", inplace=True)
-                if len(combined) > 5000:
-                    combined = combined.iloc[-5000:]
-                raw_data = combined
+                # Append new data only
+                last_ts = self.historic_data["timestamp"].iloc[-1]
+                new_rows = raw_data[raw_data["timestamp"] > last_ts]
+                if not new_rows.empty:
+                    self.historic_data = pd.concat([self.historic_data, new_rows])
+                    
+                # Maintain Buffer
+                if len(self.historic_data) > Config.LIVE_DATA_BUFFER_SIZE:
+                    self.historic_data = self.historic_data.iloc[-Config.LIVE_DATA_BUFFER_SIZE:]
+                
+                raw_data = self.historic_data.copy()
+            else:
+                self.historic_data = raw_data
 
             # Confirmation Data
             confirm_data = await self.exchange.fetch_confirm_ohlcv(symbol=self.symbol)
 
             if not self.historic_confirm_data.empty:
-                combined_conf = pd.concat([self.historic_confirm_data, confirm_data])
-                combined_conf.drop_duplicates(subset="timestamp", keep="last", inplace=True)
-                combined_conf.sort_values("timestamp", inplace=True)
-                if len(combined_conf) > 15000:
-                    combined_conf = combined_conf.iloc[-15000:]
-                confirm_data = combined_conf
+                last_ts = self.historic_confirm_data["timestamp"].iloc[-1]
+                new_rows = confirm_data[confirm_data["timestamp"] > last_ts]
+                if not new_rows.empty:
+                    self.historic_confirm_data = pd.concat([self.historic_confirm_data, new_rows])
+                
+                if len(self.historic_confirm_data) > Config.LIVE_DATA_BUFFER_SIZE_CONFIRM:
+                    self.historic_confirm_data = self.historic_confirm_data.iloc[-Config.LIVE_DATA_BUFFER_SIZE_CONFIRM:]
+                
+                confirm_data = self.historic_confirm_data.copy()
+            else:
+                self.historic_confirm_data = confirm_data
 
             # BTC Data (Context)
             btc_data = await self.exchange.fetch_ohlcv(
@@ -139,19 +156,24 @@ class TradingAgent:
             )
 
             if not self.historic_btc_data.empty:
-                combined_btc = pd.concat([self.historic_btc_data, btc_data])
-                combined_btc.drop_duplicates(subset="timestamp", keep="last", inplace=True)
-                combined_btc.sort_values("timestamp", inplace=True)
-                if len(combined_btc) > 5000:
-                    combined_btc = combined_btc.iloc[-5000:]
-                btc_data = combined_btc
+                last_ts = self.historic_btc_data["timestamp"].iloc[-1]
+                new_rows = btc_data[btc_data["timestamp"] > last_ts]
+                if not new_rows.empty:
+                    self.historic_btc_data = pd.concat([self.historic_btc_data, new_rows])
+                
+                if len(self.historic_btc_data) > Config.LIVE_DATA_BUFFER_SIZE:
+                    self.historic_btc_data = self.historic_btc_data.iloc[-Config.LIVE_DATA_BUFFER_SIZE:]
+                
+                btc_data = self.historic_btc_data.copy()
+            else:
+                self.historic_btc_data = btc_data
 
             if raw_data.empty:
                 self.logger.warning("No primary data fetched.")
                 return
 
             # B. Feature Engineering
-            context = {}
+            context: Dict[str, Any] = {"pair_config": self.config}
             if not btc_data.empty:
                 btc_copy = btc_data.copy()
                 if "timestamp" in btc_copy.columns:
@@ -238,7 +260,8 @@ class TradingAgent:
 
         analysis = self.strategy_selector.analyze(
             enriched_data,
-            ml_score,
+            pair_config=self.config,
+            ml_score=ml_score,
             confirm_df=enriched_confirm,
             l2_features=l2_features,
             regime=regime_name,
@@ -250,6 +273,10 @@ class TradingAgent:
             current_balance_btc=current_base_bal,
             current_equity_usdt=current_equity
         )
+
+        # Log Decision to DB
+        if self.db and self.run_id:
+            self.db.log_decision(self.run_id, analysis)
 
         signal = analysis["signal"]
         multiplier = analysis.get("size_multiplier", 0.0)
@@ -307,11 +334,11 @@ class TradingAgent:
         updates = {}
 
         if pos_strategy == "TrendFollowing":
-            updates = self.strategy_selector.trend_following.get_exit_updates(self.position, analysis)
+            updates = self.strategy_selector.trend_following.get_exit_updates(self.position, analysis, self.config)
         elif pos_strategy == "BTCSmartDCA":
-            updates = self.strategy_selector.btc_dca.get_exit_updates(self.position, analysis)
+            updates = self.strategy_selector.btc_dca.get_exit_updates(self.position, analysis, self.config)
         else:
-            updates = self.strategy_selector.mean_reversion.get_exit_updates(self.position, analysis)
+            updates = self.strategy_selector.mean_reversion.get_exit_updates(self.position, analysis, self.config)
 
         if updates.get("exit_signal"):
             exit_signal = True
@@ -353,17 +380,12 @@ class TradingAgent:
 
         qty = 0.0
         if self.config.enable_dca_mode:
-            dca_config = {
-                "target_allocation": self.config.dca_target_allocation,
-                "dip_threshold_rsi": self.config.dca_dip_threshold_rsi,
-                "notional_per_trade": self.config.dca_notional_per_trade,
-            }
             # Get shortfall from analysis context
             shortfall_usdt = analysis.get("decision_context", {}).get("shortfall_usdt", 0.0)
-            qty = self.strategy_selector.btc_dca.calculate_position_size(dca_config, current_price, shortfall_usdt)
+            qty = self.strategy_selector.btc_dca.calculate_position_size(self.config, current_price, shortfall_usdt)
         else:
             # Size based on Total Equity
-            qty = self.risk_manager.calculate_size(total_equity, current_price, atr, multiplier, regime_name)
+            qty = self.risk_manager.calculate_size(total_equity, current_price, atr, self.config, multiplier, regime_name)
 
         # Cap at available USDT
         if (qty * current_price) > usdt_balance:
@@ -374,7 +396,7 @@ class TradingAgent:
             client_oid = f"sentinel_{self.symbol.replace('/', '')}_{int(asyncio.get_event_loop().time())}"
             order = await self.exchange.create_entry_order(signal, qty, current_price, client_oid, symbol=self.symbol)
 
-            sl_dist = atr * Config.ATR_MULTIPLIER
+            sl_dist = atr * self.config.atr_multiplier
             stop_loss = current_price - sl_dist
             
             # Disable SL for DCA Mode
@@ -409,18 +431,27 @@ class TradingAgent:
     def _load_historic_data(self, symbol: str, timeframe: str) -> pd.DataFrame:
         """Loads historic data from CSV."""
         try:
-            base_symbol = symbol.split("/")[0]
-            data_dir = f"data/{base_symbol}"
-            if not os.path.exists(data_dir):
-                return pd.DataFrame()
+            # Use get_data_path to resolve correct path (handles mapping)
+            file_path = get_data_path(symbol, timeframe)
+            
+            if not file_path.exists():
+                # Fallback: Try directory search if exact match fails
+                # This handles cases where file naming might differ slightly or we want newest
+                from src.config import SYMBOL_MAP
+                short_name = SYMBOL_MAP.get(symbol, symbol.split("/")[0])
+                data_dir = f"data/{short_name}"
+                
+                if not os.path.exists(data_dir):
+                    return pd.DataFrame()
 
-            files = [f for f in os.listdir(data_dir) if f.endswith(".csv") and timeframe in f]
-            if not files:
-                return pd.DataFrame()
+                files = [f for f in os.listdir(data_dir) if f.endswith(".csv") and timeframe in f]
+                if not files:
+                    return pd.DataFrame()
 
-            files.sort(key=lambda x: os.path.getsize(os.path.join(data_dir, x)), reverse=True)
-            file_path = os.path.join(data_dir, files[0])
-
+                # Sort by modification time (newest first)
+                files.sort(key=lambda x: os.path.getmtime(os.path.join(data_dir, x)), reverse=True)
+                file_path = os.path.join(data_dir, files[0])
+            
             self.logger.info(f"Loading historic data from {file_path}...")
             df = pd.read_csv(file_path)
 

@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from src.config import Config
+from src.config import Config, PairConfig
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ class TrendFollowingStrategy:
     def analyze(
         self,
         df: pd.DataFrame,
+        pair_config: PairConfig,
         ml_score: Optional[float] = None,
         confirm_df: Optional[pd.DataFrame] = None,
         l2_features: Optional[Dict[str, Any]] = None,
@@ -109,7 +110,7 @@ class TrendFollowingStrategy:
 
         # 3. Guardrails (Volatility Shield)
         # Reuse Mean Reversion's shield
-        if current["atr"] / current["close"] > Config.MAX_VOLATILITY_THRESHOLD:
+        if current["atr"] / current["close"] > pair_config.max_volatility_threshold:
             context["reason_string"] = "High Volatility"
             return result
 
@@ -133,25 +134,25 @@ class TrendFollowingStrategy:
             return result
 
         # Condition B: Trend Strength
-        if current["adx"] < Config.ADX_THRESHOLD:
+        if current["adx"] < pair_config.adx_threshold:
             context["reason_string"] = "Weak Trend (Low ADX)"
             return result
 
         # Avoid Exhaustion (ADX too high)
-        max_adx = getattr(Config, "TREND_ADX_MAX", 100.0)
+        max_adx = pair_config.trend_adx_max
         if current["adx"] > max_adx:
             context["reason_string"] = f"Trend Exhaustion (ADX {current['adx']:.1f} > {max_adx})"
             return result
 
         # Condition C: Volume Profile Context
         # Avoid chasing if far above VAH (Exhaustion risk)
-        if current.get("above_vah_prev") == 1 and current.get("dist_to_poc_prev", 0) > 0.02:
+        if current.get("above_vah_prev") == 1 and current.get("dist_to_poc_prev", 0) > pair_config.trend_dist_to_poc_max:
             context["reason_string"] = "Extended above Value Area"
             return result
 
         # Condition D: Trend Extension (Avoid buying tops)
         # Calculate extension from EMA50 (Momentum Base)
-        max_extension = getattr(Config, "TREND_MAX_EXTENSION", 0.015)
+        max_extension = pair_config.trend_max_extension
         if ema_extension > max_extension:
             context["reason_string"] = f"Overextended ({ema_extension:.2%})"
             return result
@@ -159,7 +160,7 @@ class TrendFollowingStrategy:
         # Condition E: RSI Filter
         rsi = current.get("rsi")
         if rsi is not None:
-            max_rsi = getattr(Config, "TREND_RSI_MAX", 60.0)
+            max_rsi = pair_config.trend_rsi_max
 
             if rsi > max_rsi:
                 context["reason_string"] = f"RSI Overbought ({rsi:.2f} > {max_rsi})"
@@ -176,23 +177,23 @@ class TrendFollowingStrategy:
 
         # Condition G: Volume Accelerator (Retail Mania)
         # Check if Volume > 2.0 * VolMA
-        if vol_ratio > 2.0:
+        if vol_ratio > pair_config.trend_vol_ratio_mania:
             context["is_mania"] = True
 
         # Condition H: Volume Gate (Momentum Confirmation)
         # Require Volume > 1.0 * VolMA for SOL entries
-        if vol_ratio < 1.0:
-            context["reason_string"] = f"Low Volume ({vol_ratio:.2f} < 1.0)"
+        if vol_ratio < pair_config.trend_vol_ratio_min:
+            context["reason_string"] = f"Low Volume ({vol_ratio:.2f} < {pair_config.trend_vol_ratio_min})"
             return result
 
         # Avoid Climax Volume (Buying the top)
         # Unless it's a breakout from low volatility? No, safer to avoid.
-        if vol_ratio > 1.5:
-            context["reason_string"] = f"Climax Volume ({vol_ratio:.2f} > 1.5)"
+        if vol_ratio > pair_config.trend_vol_ratio_climax:
+            context["reason_string"] = f"Climax Volume ({vol_ratio:.2f} > {pair_config.trend_vol_ratio_climax})"
             return result
 
         # 5. ML Confirmation
-        ml_threshold = getattr(Config, "ML_TREND_LONG_THRESHOLD", 0.65)
+        ml_threshold = pair_config.ml_trend_long_threshold
 
         if Config.ML_ENABLED and ml_threshold > 0.0:
             if ml_score is None:
@@ -204,12 +205,7 @@ class TrendFollowingStrategy:
                 return result
 
         # 6. 1m Confirmation (Optional)
-        if confirm_df is not None and not confirm_df.empty:
-            # Simple check: No sharp reversal in last 3 bars
-            last_1m = confirm_df.iloc[-1]
-            first_1m = confirm_df.iloc[0]
-            if last_1m["close"] < first_1m["open"]:  # Bearish candle sequence
-                pass
+        # Placeholder for future logic
 
         # 7. Signal Generation
         result["signal"] = "LONG"
@@ -217,21 +213,19 @@ class TrendFollowingStrategy:
         # We pass 0.5 to indicate "Standard Trend Size" (which is 0.6x BTC size per user request)
         # If RiskManager uses (Equity * 0.01) / (2.5 * ATR), then size_multiplier scales that.
         # Let's assume RiskManager handles the base calculation.
-        result["size_multiplier"] = 0.6
+        result["size_multiplier"] = pair_config.trend_size_multiplier
         context["final_signal"] = "LONG"
         context["reason_string"] = "Trend Follow Entry"
 
         return result
 
-    def get_exit_updates(self, position: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
+    def get_exit_updates(self, position: Dict[str, Any], analysis: Dict[str, Any], pair_config: PairConfig) -> Dict[str, Any]:
         """
         Calculates exit updates (Trailing SL, TP, etc.) for Trend Following positions.
         """
         updates: Dict[str, Any] = {"exit_signal": False, "exit_reason": None, "new_sl": None, "tp1": False}
 
         current_price = analysis["close"]
-        analysis.get("ema50")
-        analysis.get("ema20", analysis.get("bb_mid"))  # Fallback to BB Mid (SMA20)
 
         # Check for Mania Context
         is_mania = False
@@ -259,10 +253,10 @@ class TrendFollowingStrategy:
         if atr > 0:
             if is_mania:
                 # Looser Trail (3.0 ATR)
-                trail_level = current_price - (3.0 * atr)
+                trail_level = current_price - (pair_config.trend_trail_atr_mania * atr)
             else:
                 # Standard Trail (2.0 ATR)
-                trail_level = current_price - (2.0 * atr)
+                trail_level = current_price - (pair_config.trend_trail_atr_standard * atr)
 
             # Only move SL up
             if trail_level > position["stop_loss"]:
@@ -270,7 +264,7 @@ class TrendFollowingStrategy:
 
         # 3. ML Deterioration (Optional)
         ml_score = analysis.get("ml_score")
-        if ml_score is not None and ml_score < 0.45:
+        if ml_score is not None and ml_score < pair_config.trend_ml_exit_threshold:
             updates["exit_signal"] = True
             updates["exit_reason"] = "ML Deterioration"
 

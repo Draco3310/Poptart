@@ -1,10 +1,12 @@
 import asyncio
 import logging
+from datetime import datetime
 from typing import List
 
-from src.config import PAIR_CONFIGS, Config
+from src.config import Config
+from src.core.orchestrator import AgentOrchestrator
 from src.core.risk_manager import RiskManager
-from src.core.trading_agent import TradingAgent
+from src.database import Database
 from src.exchange import KrakenExchange
 from src.notifier import TelegramNotifier
 
@@ -46,51 +48,37 @@ async def main() -> None:
 
         risk_manager = RiskManager()
 
+        # Initialize Database & Run
+        db = Database()
+        db.init_live_schema()
+        db.init_backtest_schema() # Ensure decision tables exist
+
+        run_id = f"LIVE_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        run_type = "PAPER" if Config.DRY_RUN else "LIVE"
+        db.register_run(run_id, run_type, notes="Auto-started by Orchestrator")
+
         # Start Balance Monitor
         balance_task = asyncio.create_task(monitor_balance(exchange))
 
-        logger.info("Shared components initialized.")
+        logger.info(f"Shared components initialized. Run ID: {run_id}")
 
     except Exception as e:
         logger.critical(f"Initialization failed: {e}")
         return
 
-    # 2. Initialize Agents
-    agents: List[TradingAgent] = []
+    # 2. Initialize Orchestrator
+    orchestrator = AgentOrchestrator(exchange, notifier, risk_manager, db=db, run_id=run_id)
+    
     try:
-        for symbol, pair_config in PAIR_CONFIGS.items():
-            logger.info(f"Creating Agent for {symbol}...")
-            agent = TradingAgent(pair_config, exchange, notifier, risk_manager)
-            await agent.initialize()
-            agents.append(agent)
-
-        logger.info(f"Initialized {len(agents)} agents: {[a.symbol for a in agents]}")
-
+        await orchestrator.initialize_agents()
     except Exception as e:
-        logger.critical(f"Agent initialization failed: {e}")
+        logger.critical(f"Orchestrator initialization failed: {e}")
         await exchange.close()
         return
 
-    # 3. Main Loop
+    # 3. Start Orchestrator
     try:
-        while True:
-            logger.debug("Starting Tick Cycle...")
-
-            for agent in agents:
-                logger.debug(f"Ticking {agent.symbol}...")
-                await agent.tick()
-
-                # Stagger to respect API limits
-                # Kraken Rate Limit: ~1 call per second per endpoint usually safe
-                # Agent tick does multiple calls (OHLCV x2, BTC, OrderBook, Price)
-                # So we need a decent gap.
-                await asyncio.sleep(2)
-
-            # Main Loop Interval
-            # Wait before next cycle
-            logger.debug("Cycle complete. Sleeping...")
-            await asyncio.sleep(10)
-
+        await orchestrator.start()
     except asyncio.CancelledError:
         logger.info("Main loop cancelled.")
     except Exception as e:
@@ -103,7 +91,8 @@ async def main() -> None:
                 await balance_task
             except asyncio.CancelledError:
                 pass
-
+        
+        await orchestrator.stop()
         await exchange.close()
         await notifier.notify_shutdown()
 

@@ -1,11 +1,11 @@
-import sqlite3
 import sys
-
 import pandas as pd
+from src.core.backtest_analytics import BacktestAnalytics
 
 
 def analyze_trades(run_id: str) -> None:
-    conn = sqlite3.connect("data/sentinel.db")
+    analytics = BacktestAnalytics()
+    conn = analytics.db._get_connection()
 
     # 1. Get All Trades
     query = f"SELECT * FROM bt_trades WHERE run_id = '{run_id}' ORDER BY timestamp"
@@ -71,7 +71,7 @@ def analyze_trades(run_id: str) -> None:
     analyze_subset(wins.head(5), run_id, conn)
 
 
-def analyze_subset(subset_df: pd.DataFrame, run_id: str, conn: sqlite3.Connection) -> None:
+def analyze_subset(subset_df: pd.DataFrame, run_id: str, conn) -> None:
     if subset_df.empty:
         print("None.")
         return

@@ -22,7 +22,6 @@ class BetaFeatureBlock(FeatureBlock):
 
         # Check if BTC context is available
         if not context or "btc_df" not in context:
-            # logger.warning("BTC context not provided. Skipping Beta features.")
             # Fill with 0 or NaN to avoid breaking models expecting these columns
             df["beta_24h"] = 0.0
             df["rs_ratio"] = 1.0
@@ -38,12 +37,6 @@ class BetaFeatureBlock(FeatureBlock):
         # Align DataFrames on Timestamp
         # We assume both are 1m candles.
 
-        # Ensure indices are DatetimeIndex
-        if not isinstance(df.index, pd.DatetimeIndex):
-            df.index = pd.to_datetime(df.index)
-        if not isinstance(btc_df.index, pd.DatetimeIndex):
-            btc_df.index = pd.to_datetime(btc_df.index)
-
         # Merge
         # We use 'left' join to keep SOL timestamps
         merged = df[["close"]].merge(
@@ -57,21 +50,21 @@ class BetaFeatureBlock(FeatureBlock):
         merged["ret_sol"] = merged["close"].pct_change()
         merged["ret_btc"] = merged["close_btc"].pct_change()
 
-        # Determine window size based on timeframe
-        # Default to 1m (1440 bars for 24h)
-        window_24h = 1440
-        window_4h = 240
+        # Determine window size dynamically based on data frequency
+        if len(df) > 1:
+            # Calculate minutes per candle
+            time_diff = df.index[1] - df.index[0]
+            minutes = time_diff.total_seconds() / 60
+            if minutes <= 0:
+                minutes = 5  # Fallback to avoid div/0
 
-        # Try to infer from Config or Data
-        if Config.TIMEFRAME_PRIMARY == "5m":
-            window_24h = 288  # 24 * 12
-            window_4h = 48    # 4 * 12
-        elif Config.TIMEFRAME_PRIMARY == "15m":
-            window_24h = 96
-            window_4h = 16
-        elif Config.TIMEFRAME_PRIMARY == "1h":
-            window_24h = 24
-            window_4h = 4
+            window_24h = int(1440 / minutes)
+            window_4h = int(240 / minutes)
+        else:
+            # Fallback if not enough data to infer
+            # Default to 5m assumption (288 bars for 24h)
+            window_24h = 288
+            window_4h = 48
 
         # 1. Rolling Beta (24h)
         # Beta = Cov(SOL, BTC) / Var(BTC)

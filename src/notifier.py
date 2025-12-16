@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import ssl
 
-import requests
+import aiohttp
+import certifi
 
 from src.config import Config
 
@@ -10,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 class TelegramNotifier:
     """
-    Handles Telegram notifications (Async Wrapper).
+    Handles Telegram notifications (Async Native).
     """
 
     def __init__(self, token: str, chat_id: str) -> None:
@@ -27,28 +29,37 @@ class TelegramNotifier:
         payload = {"chat_id": self.chat_id, "text": message, "parse_mode": "Markdown"}
 
         try:
-            # Run synchronous requests in a separate thread to avoid blocking the event loop
-            await asyncio.to_thread(self._post_request, payload)
+            await self._post_request(payload)
         except Exception as e:
             logger.error(f"Failed to send Telegram message: {e}")
 
-    def _post_request(self, payload: dict) -> None:
-        """Helper to run in thread."""
-        try:
-            # Try with SSL verification first
-            response = requests.post(self.base_url, json=payload, timeout=10)
-            response.raise_for_status()
-        except requests.exceptions.SSLError:
-            # Retry without SSL verification (Proxy workaround)
+    async def _post_request(self, payload: dict) -> None:
+        """Async POST request with SSL fallback."""
+        ssl_context = ssl.create_default_context(cafile=certifi.where())
+        timeout = aiohttp.ClientTimeout(total=10)
+        
+        # Use trust_env=True to respect HTTP_PROXY/HTTPS_PROXY environment variables
+        async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
             try:
-                import urllib3
-                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-                response = requests.post(self.base_url, json=payload, timeout=10, verify=False)
-                response.raise_for_status()
+                async with session.post(self.base_url, json=payload, ssl=ssl_context) as response:
+                    if response.status != 200:
+                        text = await response.text()
+                        logger.warning(f"Telegram API Error: {response.status} - {text}")
+                    else:
+                        # Success
+                        return
+            except (aiohttp.ClientSSLError, ssl.SSLError):
+                # Retry without SSL verification
+                logger.warning("Telegram SSL failed, retrying without verification...")
+                try:
+                    async with session.post(self.base_url, json=payload, ssl=False) as response:
+                        if response.status != 200:
+                            text = await response.text()
+                            logger.warning(f"Telegram API Error (No SSL): {response.status} - {text}")
+                except Exception as e:
+                    logger.warning(f"Telegram Request Failed (No SSL): {e}")
             except Exception as e:
-                logger.warning(f"Telegram Request Failed (SSL Error): {e}")
-        except requests.exceptions.RequestException as e:
-            logger.warning(f"Telegram Request Failed: {e}")
+                logger.warning(f"Telegram Request Failed: {e}")
 
     async def notify_startup(self) -> None:
         msg = f"🚀 *XRP-Sentinel V3 Started*\nSymbol: `{Config.SYMBOL}`\nTimeframe: `{Config.TIMEFRAME_PRIMARY}`"

@@ -1,3 +1,4 @@
+import argparse
 import logging
 import os
 import sys
@@ -9,21 +10,27 @@ sys.path.append(os.getcwd())
 
 from src.config import get_data_path
 from src.core.feature_engine import FeatureEngine
+from src.utils.data_loader import load_data
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("DebugFeatures")
 
 
-def debug_features() -> None:
+def debug_features(pair: str) -> None:
     # Load Data
-    data_path = str(get_data_path("SOLUSDT", "1m"))
+    try:
+        data_path = str(get_data_path(pair, "1m"))
+    except Exception as e:
+        logger.error(f"Failed to get data path: {e}")
+        return
+
     if not os.path.exists(data_path):
         logger.error(f"Data not found: {data_path}")
         return
 
     logger.info(f"Loading data from {data_path}...")
-    df = pd.read_csv(data_path)
+    df = load_data(data_path)
 
     # Limit to 1000 rows for speed
     df = df.head(1000)
@@ -43,4 +50,8 @@ def debug_features() -> None:
 
 
 if __name__ == "__main__":
-    debug_features()
+    parser = argparse.ArgumentParser(description="Debug Features")
+    parser.add_argument("--pair", type=str, default="SOLUSDT", help="Trading pair")
+    args = parser.parse_args()
+
+    debug_features(args.pair)

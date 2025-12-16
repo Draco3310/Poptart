@@ -54,8 +54,35 @@ class SimulatedKrakenExchange:
         self.orders: list[Dict[str, Any]] = []
         self.trades: list[Dict[str, Any]] = []
 
+        # Cache for resampled dataframes
+        # Structure: {symbol: {timeframe: dataframe}}
+        self.resampled_cache: Dict[str, Dict[str, pd.DataFrame]] = {}
+        self._precalculate_resampled_data()
+
         logger.info(f"Simulated Exchange initialized with {len(self.symbols)} pairs.")
         logger.info(f"Initial Balance: {initial_balance} USDT")
+
+    def _precalculate_resampled_data(self) -> None:
+        """Pre-calculates resampled dataframes for common timeframes to avoid O(N^2) overhead."""
+        logger.info("Pre-calculating resampled dataframes...")
+        common_timeframes = ["5m", "15m", "1h", "4h", "1d"]
+        
+        agg_rules = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+
+        for symbol in self.symbols:
+            self.resampled_cache[symbol] = {}
+            df = self.data_map[symbol].copy()
+            df.set_index("timestamp", inplace=True)
+            
+            for tf in common_timeframes:
+                try:
+                    pd_tf = tf.replace("m", "min") if tf.endswith("m") else tf
+                    resampled = df.resample(pd_tf).agg(agg_rules)
+                    resampled = resampled.dropna()
+                    resampled.reset_index(inplace=True)
+                    self.resampled_cache[symbol][tf] = resampled
+                except Exception as e:
+                    logger.warning(f"Failed to pre-calculate {tf} for {symbol}: {e}")
 
     def reset(self) -> None:
         """Resets the simulation to the beginning."""
@@ -95,43 +122,72 @@ class SimulatedKrakenExchange:
 
         df = self.data_map[target_symbol]
 
-        # Determine lookback based on timeframe
-        # Assuming base data is 1m
-        lookback_multiplier = 1
-        if timeframe == "5m":
-            lookback_multiplier = 5
-        elif timeframe == "15m":
-            lookback_multiplier = 15
-        elif timeframe == "1h":
-            lookback_multiplier = 60
-        elif timeframe == "4h":
-            lookback_multiplier = 240
-        elif timeframe == "1d":
-            lookback_multiplier = 1440
-
-        # We need enough raw data to generate 'limit' candles of the target timeframe
-        raw_limit = limit * lookback_multiplier
-
-        start_idx = max(0, self.current_index - raw_limit + 1)
-        subset = df.iloc[start_idx : self.current_index + 1].copy()
+        current_time = self.get_current_time()
 
         if timeframe == "1m":
-            return subset
+            # For 1m, we can just slice the original dataframe
+            # We need 'limit' rows ending at current_index
+            start_idx = max(0, self.current_index - limit + 1)
+            return df.iloc[start_idx : self.current_index + 1].copy()
 
-        # Resample
+        # Check cache
+        if symbol in self.resampled_cache and timeframe in self.resampled_cache[symbol]:
+            cached_df = self.resampled_cache[symbol][timeframe]
+            
+            # Optimization: Use searchsorted instead of boolean indexing
+            # Boolean indexing is O(N), which becomes O(N^2) over the simulation loop.
+            # searchsorted is O(log N).
+            
+            # Find the insertion point for current_time to include it
+            # side='right' returns index i such that a[:i] <= x < a[i:]
+            idx = cached_df["timestamp"].searchsorted(current_time, side='right')
+            
+            # We want rows up to idx (exclusive of idx because it's 'right', so it points to next element)
+            # But wait, if current_time matches exactly, 'right' puts it after.
+            # So cached_df.iloc[:idx] includes the match.
+            # If current_time is between candles, 'right' puts it after the previous one?
+            # Example: timestamps [10:00, 10:05]. current_time 10:03.
+            # searchsorted(10:03, right) -> index 1 (10:05).
+            # So [:1] gives [10:00]. Correct.
+            # Example: current_time 10:05.
+            # searchsorted(10:05, right) -> index 2 (after 10:05).
+            # So [:2] gives [10:00, 10:05]. Correct.
+            
+            if idx == 0:
+                return pd.DataFrame(columns=cached_df.columns)
+                
+            start_idx = max(0, idx - limit)
+            return cached_df.iloc[start_idx:idx].copy()
+
+        # Fallback: On-the-fly resampling (Slow!)
+        logger.warning(f"Timeframe {timeframe} not cached for {symbol}. Performing slow on-the-fly resampling.")
+        
+        # Determine lookback based on timeframe
+        try:
+            unit = timeframe[-1]
+            value = int(timeframe[:-1])
+            if unit == 'm':
+                lookback_multiplier = value
+            elif unit == 'h':
+                lookback_multiplier = value * 60
+            elif unit == 'd':
+                lookback_multiplier = value * 1440
+            else:
+                lookback_multiplier = 1
+        except ValueError:
+            lookback_multiplier = 1
+
+        raw_limit = limit * lookback_multiplier
+        start_idx = max(0, self.current_index - raw_limit + 1)
+        subset = df.iloc[start_idx : self.current_index + 1].copy()
+        
         subset.set_index("timestamp", inplace=True)
-
-        # Define aggregation rules
         agg_rules = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-
-        # Map timeframe to pandas offset alias if needed
         pd_timeframe = timeframe.replace("m", "min") if timeframe.endswith("m") else timeframe
-
-        # Resample to target timeframe
-        resampled = subset.resample(pd_timeframe).agg(agg_rules)  # type: ignore
+        resampled = subset.resample(pd_timeframe).agg(agg_rules)
         resampled = resampled.dropna()
         resampled.reset_index(inplace=True)
-
+        
         return resampled.iloc[-limit:]
 
     async def fetch_confirm_ohlcv(

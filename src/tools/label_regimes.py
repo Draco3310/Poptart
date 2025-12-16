@@ -9,19 +9,11 @@ import pandas as pd
 sys.path.append(os.getcwd())
 
 from src.core.feature_engine import FeatureEngine
+from src.utils.data_loader import load_data
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("RegimeLabeler")
-
-
-def load_data(filepath: str) -> pd.DataFrame:
-    logger.info(f"Loading data from {filepath}...")
-    df = pd.read_csv(filepath, header=None, names=["timestamp", "open", "high", "low", "close", "volume", "trades"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
-    df.set_index("timestamp", inplace=True)
-    df.sort_index(inplace=True)
-    return df
 
 
 def label_regimes(df: pd.DataFrame, method: str = "adx", **kwargs: Any) -> pd.DataFrame:

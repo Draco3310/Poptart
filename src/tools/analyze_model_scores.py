@@ -1,3 +1,4 @@
+import argparse
 import logging
 import os
 import sys
@@ -9,27 +10,29 @@ import xgboost as xgb
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
+from src.config import get_data_path, get_model_path
 from src.core.feature_engine import FeatureEngine
+from src.utils.data_loader import load_data
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
-def analyze_scores() -> None:
-    data_path = "data/XRPUSDT_1.csv"
-    rf_path = "models/rf_tp_sl_H1_microvol_v1.joblib"
-    xgb_path = "models/xgb_tp_sl_H1_microvol_v1.model"
+def analyze_scores(pair: str, version: str) -> None:
+    try:
+        data_path = get_data_path(pair, "1m")
+        rf_path = get_model_path(pair, f"rf_tp_sl_H1_{version}", ext=".joblib")
+        xgb_path = get_model_path(pair, f"xgb_tp_sl_H1_{version}", ext=".model")
+    except Exception as e:
+        logger.error(f"Failed to resolve paths: {e}")
+        return
 
     if not os.path.exists(data_path):
-        logger.error("Data file not found.")
+        logger.error(f"Data file not found: {data_path}")
         return
 
     # 1. Load Data
-    logger.info("Loading data...")
-    df = pd.read_csv(data_path, header=None, names=["timestamp", "open", "high", "low", "close", "volume", "trades"])
-    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
-    df.set_index("timestamp", inplace=True)
-    df.sort_index(inplace=True)
+    df = load_data(str(data_path))
 
     # Resample to 5m
     agg_rules = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
@@ -45,6 +48,10 @@ def analyze_scores() -> None:
 
     # 3. Load Models
     logger.info("Loading models...")
+    if not os.path.exists(rf_path) or not os.path.exists(xgb_path):
+        logger.error(f"Model files not found: {rf_path} or {xgb_path}")
+        return
+
     rf_model = joblib.load(rf_path)
     xgb_model = xgb.Booster()
     xgb_model.load_model(xgb_path)
@@ -90,4 +97,9 @@ def analyze_scores() -> None:
 
 
 if __name__ == "__main__":
-    analyze_scores()
+    parser = argparse.ArgumentParser(description="Analyze Model Scores")
+    parser.add_argument("--pair", type=str, default="XRPUSDT", help="Trading pair")
+    parser.add_argument("--version", type=str, default="microvol_v1", help="Model version tag")
+    args = parser.parse_args()
+
+    analyze_scores(args.pair, args.version)

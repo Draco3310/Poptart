@@ -41,45 +41,42 @@ class RandomForestPredictor(BasePredictor):
             logger.error(f"Failed to load Random Forest model: {e}")
             raise
 
-    def predict(self, enriched_df: pd.DataFrame) -> Any:
+    def _prepare_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Helper to select and align features."""
+        if self.feature_names:
+            # Zero fill missing features
+            missing = [f for f in self.feature_names if f not in df.columns]
+            if missing:
+                new_cols = {m: 0.0 for m in missing}
+                df = df.assign(**new_cols)
+            return df[self.feature_names]
+        else:
+            return df.select_dtypes(include=[np.number])
+
+    def predict_single(self, enriched_df: pd.DataFrame) -> float:
         if not self.model:
             raise RuntimeError("Model not loaded.")
 
-        target_df = enriched_df
-        is_batch = len(enriched_df) > 200
+        # Take last row
+        target_df = enriched_df.iloc[[-1]]
+        X = self._prepare_features(target_df)
 
-        if not is_batch:
-            target_df = enriched_df.iloc[[-1]]
-
-        # Feature Selection
-        if self.feature_names:
-            # Zero fill missing features
-            missing = [f for f in self.feature_names if f not in target_df.columns]
-            if missing:
-                # Use assign to avoid SettingWithCopyWarning
-                for m in missing:
-                    target_df = target_df.assign(**{m: 0.0})
-            X = target_df[self.feature_names]
-        else:
-            X = target_df.select_dtypes(include=[np.number])
-
-        # Predict Proba
-        # Classes are usually [0, 1]. We want proba of class 1 (Buy).
         try:
             probs = self.model.predict_proba(X)
-            # probs is [[prob_0, prob_1], [prob_0, prob_1], ...]
-            if is_batch:
-                return probs[:, 1] # Return array of class 1 probabilities
-            else:
-                score = float(probs[0][1])
-                return score
+            return float(probs[0][1])
         except AttributeError:
-            # Fallback if predict_proba not supported (e.g. Regressor)
             pred = self.model.predict(X)
-            if is_batch:
-                return pred
-            else:
-                score = float(pred[0])
-                # Clip to 0-1 just in case
-                score = max(0.0, min(1.0, score))
-                return score
+            score = float(pred[0])
+            return max(0.0, min(1.0, score))
+
+    def predict_batch(self, enriched_df: pd.DataFrame) -> Any:
+        if not self.model:
+            raise RuntimeError("Model not loaded.")
+
+        X = self._prepare_features(enriched_df)
+
+        try:
+            probs = self.model.predict_proba(X)
+            return probs[:, 1]
+        except AttributeError:
+            return self.model.predict(X)

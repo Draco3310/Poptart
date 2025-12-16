@@ -82,7 +82,8 @@ class VolumeProfileFeatureBlock(FeatureBlock):
         2. Daily Volume Profile (Yesterday's POC, VAH, VAL).
         """
         # --- 1. Intraday VWAP (Existing) ---
-        window = self.window_hours * 12
+        # Use time-based rolling
+        window = f'{self.window_hours}h'
         pv = df["close"] * df["volume"]
         rolling_pv = pv.rolling(window=window).sum()
         rolling_vol = df["volume"].rolling(window=window).sum()
@@ -144,23 +145,12 @@ class VolumeProfileFeatureBlock(FeatureBlock):
         stats_df.columns = ["poc_prev_day", "vah_prev_day", "val_prev_day"]
 
         # Merge back to original DF
-        # Efficient way: merge on date
-
-        # Create a temporary date column
-        df["temp_date"] = df.index.date
-        df["temp_date"] = pd.to_datetime(df["temp_date"])
-
-        # Merge
-        # stats_df index is datetime (normalized to midnight)
-        merged = df.merge(stats_df, left_on="temp_date", right_index=True, how="left", suffixes=("", "_new"))
-
-        # Assign columns
-        df["poc_prev_day"] = merged["poc_prev_day"]
-        df["vah_prev_day"] = merged["vah_prev_day"]
-        df["val_prev_day"] = merged["val_prev_day"]
-
-        # Drop temp column
-        df.drop(columns=["temp_date"], inplace=True)
+        # Optimized: Use map instead of merge to avoid copying full DataFrame
+        temp_date = df.index.normalize()
+        
+        df["poc_prev_day"] = temp_date.map(stats_df["poc_prev_day"])
+        df["vah_prev_day"] = temp_date.map(stats_df["vah_prev_day"])
+        df["val_prev_day"] = temp_date.map(stats_df["val_prev_day"])
 
         # Derived Features
         df["dist_to_poc_prev"] = (df["close"] - df["poc_prev_day"]) / df["poc_prev_day"]

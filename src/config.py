@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Map full symbol to short coin name for directory structure
-SYMBOL_MAP: Dict[str, str] = {"BTCUSDT": "BTC", "XRPUSDT": "XRP", "SOLUSDT": "SOL"}
+SYMBOL_MAP: Dict[str, str] = {"BTCUSDT": "BTC", "BTC/USDT": "BTC", "XRPUSDT": "XRP", "SOLUSDT": "SOL"}
 
 
 @dataclass
@@ -26,30 +26,75 @@ class PairConfig:
     enable_trend_following: bool = False
     enable_dca_mode: bool = False
 
-    # Risk / Volatility
-    atr_multiplier: float = 2.5
-    max_volatility_threshold: float = 0.003
-
-    # Indicators
+    # --- Indicators ---
     ema_period_slow: int = 200
     ema_period_fast: int = 50
+    rsi_period: int = 14
+    rsi_overbought: int = 70
+    rsi_oversold: int = 30
+    adx_period: int = 14
     adx_threshold: int = 25
     adx_threshold_strategy: Optional[int] = None  # If None, uses adx_threshold
+    atr_period: int = 14
+    donchian_period: int = 48
+    vol_ma_period: int = 20
 
-    # ML Thresholds
+    # --- Risk / Volatility ---
+    atr_multiplier: float = 2.5
+    max_volatility_threshold: float = 0.003
+    
+    # --- ML Thresholds ---
     ml_threshold_range: float = 0.5
     ml_threshold_trend: float = 0.5
+    ml_long_threshold: float = 0.50
+    ml_short_threshold: float = 0.45
+    ml_long_threshold_low: float = 0.45
+    ml_short_threshold_low: float = 0.50
 
-    # Trend Strategy Params
+    # --- Mean Reversion Strategy Params ---
+    mean_rev_min_roi: float = 0.005
+    mean_rev_min_profit: float = 0.0
+    mean_rev_trend_ml_threshold: float = 0.6
+    mean_rev_onchain_multiplier: float = 1.2
+    mean_rev_lock_profit_multiplier_long: float = 1.005
+    mean_rev_lock_profit_multiplier_short: float = 0.995
+    adx_ranging_threshold: int = 50
+    band_atr_buffer: float = 0.0
+    
+    # OBI Thresholds
+    obi_long_threshold: float = -0.4
+    obi_short_threshold: float = 0.4
+
+    # --- Trend Strategy Params ---
     trend_trailing_stop_type: str = "ATR"  # "ATR" or "PERCENT"
     trend_trailing_stop_multiplier: float = 2.0
     trend_max_extension: float = 0.015  # Max distance from EMA200 (1.5%)
     trend_rsi_max: float = 60.0  # Max RSI for Longs (Strict)
     trend_adx_max: float = 40.0  # Max ADX (Avoid Exhaustion)
     trend_vol_max: float = 1.2  # Max Volume Ratio (Strict)
+    trend_dist_to_poc_max: float = 0.02
+    trend_vol_ratio_mania: float = 2.0
+    trend_vol_ratio_min: float = 1.0
+    trend_vol_ratio_climax: float = 1.5
+    trend_size_multiplier: float = 0.6
+    trend_ml_exit_threshold: float = 0.45
+    trend_trail_atr_mania: float = 3.0
+    trend_trail_atr_standard: float = 2.0
+    ml_trend_long_threshold: float = 0.65
 
-    # Execution
+    # --- Ratcheting Stop Loss ---
+    ratchet_breakeven_roi: float = 0.01
+    ratchet_lock_profit_roi: float = 0.025
+    ratchet_trail_roi: float = 0.020
+    ratchet_trail_atr_multiplier: float = 2.0
+
+    # --- Execution ---
     cooldown_minutes: int = 30
+    order_timeout_seconds: int = 3
+    limit_order_buffer: float = 0.005
+    order_book_depth: int = 10
+    tp1_ratio: float = 0.5
+    breakeven_buffer: float = 0.002
 
     # Models
     # Model paths are now dynamic via get_model_path()
@@ -62,6 +107,9 @@ class PairConfig:
     dca_notional_per_trade: Optional[float] = None
     dca_target_allocation: float = 0.20  # Target 20% allocation
     dca_dip_threshold_rsi: int = 50  # Buy only if RSI < 50
+    dca_rebalance_buffer_lower: float = 0.95
+    dca_rebalance_buffer_upper: float = 1.05
+    dca_min_trade_amount: float = 10.0
 
 
 class Config:
@@ -78,9 +126,23 @@ class Config:
     # Risk Management
     # Default to 0.02 (2%) if not set
     RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", "0.02"))
+    MAX_DRAWDOWN_LIMIT = 0.05  # 5% Max Drawdown
+    VOL_TARGET_ANNUAL = 0.40  # 40% Annualized Volatility Target
+    
+    # Regime Scaling
+    REGIME_SCALE_TREND = 1.2
+    REGIME_SCALE_CHOP = 0.8
+    REGIME_SCALE_VOLATILITY = 0.0
+    REGIME_HYSTERESIS = 5.0
+    
+    # Microstructure Filters
+    MAX_SPREAD_PERCENT = 0.005  # 0.5% Max Spread
 
     # Database
     DB_PATH = os.getenv("DB_PATH", "data/sentinel.db")
+    
+    # Backtest Results
+    BACKTEST_RESULTS_DIR = os.getenv("BACKTEST_RESULTS_DIR", "backtesting_results")
 
     # Proxy
     HTTP_PROXY = os.getenv("HTTP_PROXY")
@@ -88,102 +150,34 @@ class Config:
 
     # --- System Flags ---
     # If True, requires ML score to confirm signals. If False, uses Strategy logic only.
-    ML_ENABLED = True  # os.getenv("ML_ENABLED", "True").lower() == "true"
+    ML_ENABLED = os.getenv("ML_ENABLED", "True").lower() == "true"
     # If True, simulates trades without placing orders on Kraken.
     DRY_RUN = os.getenv("DRY_RUN", "True").lower() == "true"
 
     # If True, uses L2 features (OBI, Spread) for filtering.
     # Set to False for backtesting if L2 data is mocked/unreliable.
-    USE_L2_FILTERS = True
+    USE_L2_FILTERS = os.getenv("USE_L2_FILTERS", "True").lower() == "true"
 
     # Close-Only Stops (High Beta Optimization)
-    CLOSE_ONLY_STOPS = True
+    CLOSE_ONLY_STOPS = os.getenv("CLOSE_ONLY_STOPS", "True").lower() == "true"
 
-    # --- Strategy Constants (Hardcoded) ---
+    # --- Strategy Constants ---
     SYMBOL = "XRP/USDT"
     TIMEFRAME_PRIMARY = "5m"
     TIMEFRAME_CONFIRM = "1m"
-
-    # Donchian Channel
-    DONCHIAN_PERIOD = 48
-
-    # EMA
-    EMA_PERIOD: int = 200
-    EMA_PERIOD_SLOW: int = 200
-    EMA_PERIOD_FAST: int = 50
-
-    # RSI
-    RSI_PERIOD: int = 14
-    # Standard thresholds (ML will filter)
-    RSI_OVERBOUGHT: int = 70
-    RSI_OVERSOLD: int = 30
-
-    # ATR
-    ATR_PERIOD: int = 14
-    # Medium stop
-    ATR_MULTIPLIER: float = 2.5
-
-    # ADX
-    ADX_PERIOD: int = 14
-    ADX_THRESHOLD: int = 25
-
-    # --- Strategy Parameters (Mean Reversion) ---
-    # Market Regime
-    # Relaxed ranging definition (ML will filter)
-    ADX_RANGING_THRESHOLD = 50  # Max ADX to consider "Ranging"
-
-    # Volatility Filter (Avoid catching knives in high vol crashes)
-    MAX_VOLATILITY_THRESHOLD = 0.003  # Max ATR/Close ratio
-
-    # ML Thresholds (Aggressive Calibration for Frequency)
-    # Tier 1 (High Confidence) - Full Size
-    ML_LONG_THRESHOLD = 0.50  # Accept neutral-bullish
-    ML_SHORT_THRESHOLD = 0.45  # Accept neutral-bearish
-
-    # Tier 2 (Medium Confidence) - Half Size
-    ML_LONG_THRESHOLD_LOW = 0.45
-    ML_SHORT_THRESHOLD_LOW = 0.50
-
-    # Trend Following Thresholds
-    ML_TREND_LONG_THRESHOLD = 0.65
-
-    # Trend Exit Defaults
-    TREND_TRAILING_STOP_TYPE = "ATR"
-    TREND_TRAILING_STOP_MULTIPLIER = 2.0
-    TREND_MAX_EXTENSION = 0.01
-    TREND_RSI_MAX = 60.0
-
-    # Band touch buffer in ATR units (for much stronger extremes)
-    BAND_ATR_BUFFER = 0.0
-
-    # Minimum time between entries (per side) in minutes
-    MIN_TRADE_COOLDOWN_MINUTES = 30
-
-    # Exit Logic
-    MEAN_REV_MIN_ROI = 0.005  # 0.5% Minimum ROI Target (Relaxed from 1.5%)
-    MEAN_REV_MIN_PROFIT = 0.0  # 0.0% Minimum Potential Profit
-
-    # OBI Thresholds
-    OBI_LONG_THRESHOLD = -0.4  # Filter extreme sell pressure (Crash protection)
-    OBI_SHORT_THRESHOLD = 0.4  # Filter extreme buy pressure (Pump protection)
-
-    # Ratcheting Stop Loss
-    RATCHET_BREAKEVEN_ROI = 0.01  # 1.0% - Move SL to breakeven
-    RATCHET_LOCK_PROFIT_ROI = 0.025  # 2.5% - Lock in 1.0% profit
-    RATCHET_TRAIL_ROI = 0.020  # 2.0% - Start dynamic trailing
-    RATCHET_TRAIL_ATR_MULTIPLIER = 2.0  # Trail by 2.0x ATR
-
-    # Volume MA
-    VOL_MA_PERIOD = 20
-
-    # Execution
+    TIMEFRAME_CONTEXT = "1h"
+    
+    # Note: All strategy-specific parameters have been moved to PairConfig.
+    # Use get_pair_config(symbol) to access them.
+    
+    # Execution Defaults (System-wide fallback)
+    ORDER_BOOK_DEPTH = 10
+    LIMIT_ORDER_BUFFER = 0.005
     ORDER_TIMEOUT_SECONDS = 3
-    LIMIT_ORDER_BUFFER = 0.005  # 0.5% aggressive limit
-    ORDER_BOOK_DEPTH = 10  # Depth for L2 Data
-
-    # Split Position Logic
-    TP1_RATIO = 0.5  # Close 50% at TP1
-    BREAKEVEN_BUFFER = 0.002  # 0.2% buffer for fees when moving to BE
+    
+    # Live Data Buffers
+    LIVE_DATA_BUFFER_SIZE = 5000
+    LIVE_DATA_BUFFER_SIZE_CONFIRM = 15000
 
     @classmethod
     def validate(cls) -> None:
@@ -222,7 +216,7 @@ PAIR_CONFIGS: Dict[str, PairConfig] = {
         cooldown_minutes=30,
     ),
     "BTCUSDT": PairConfig(
-        symbol="BTCUSDT",
+        symbol="BTC/USDT",
         has_5m=False,
         enable_mean_reversion=False,
         enable_trend_following=False,

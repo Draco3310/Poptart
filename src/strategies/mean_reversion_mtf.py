@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 
 import pandas as pd
 
-from src.config import Config
+from src.config import Config, PairConfig
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ class MeanReversionStrategy:
     def analyze(
         self,
         df: pd.DataFrame,
+        pair_config: PairConfig,
         ml_score: Optional[float] = None,
         confirm_df: Optional[pd.DataFrame] = None,
         l2_features: Optional[Dict[str, float]] = None,
@@ -35,6 +36,7 @@ class MeanReversionStrategy:
 
         Args:
             df: Enriched DataFrame from FeatureEngine (Primary Timeframe).
+            pair_config: Pair-specific configuration.
             ml_score: Ensemble ML Prediction Score (0.0 to 1.0) or None if neutral/unavailable.
             confirm_df: Enriched DataFrame from FeatureEngine (Confirmation Timeframe - 1m).
             l2_features: Dict containing 'obi', 'spread', 'market_depth_ratio'.
@@ -45,27 +47,8 @@ class MeanReversionStrategy:
         if df.empty or len(df) < 2:
             return {"signal": None}
 
-        # DEBUG: Log columns and first few rows to diagnose missing data
-        if len(df) > 200 and len(df) < 205:
-            logger.info(f"DEBUG DF COLUMNS: {list(df.columns)}")
-            logger.info(f"DEBUG DF HEAD: {df.head(3)}")
-            logger.info(f"DEBUG DF TAIL: {df.tail(3)}")
-
         curr = df.iloc[-1]
         prev = df.iloc[-2]
-
-        # DEBUG: Log current row content
-        if len(df) > 200 and len(df) < 205:
-            logger.info(f"DEBUG CURR: {curr}")
-            logger.info(f"DEBUG CURR OPEN: {curr.get('open', 'MISSING')}")
-            logger.info(f"DEBUG CURR HIGH: {curr.get('high', 'MISSING')}")
-            logger.info(f"DEBUG CURR LOW: {curr.get('low', 'MISSING')}")
-            logger.info(f"DEBUG CURR CLOSE: {curr.get('close', 'MISSING')}")
-
-        # DEBUG: Check Config.ML_ENABLED
-        if len(df) > 200 and len(df) < 205:
-            logger.info(f"DEBUG: Config.ML_ENABLED inside Strategy: {Config.ML_ENABLED}")
-            logger.info(f"DEBUG: ml_score passed to Strategy: {ml_score}")
 
         # Basic data required for exit logic even if not enough for entry logic
         base_result = {
@@ -105,7 +88,7 @@ class MeanReversionStrategy:
         atr = curr.get("atr", 0.0)
         close = curr["close"]
         volatility = atr / close if close > 0 else 0.0
-        max_vol = getattr(Config, "MAX_VOLATILITY_THRESHOLD", 1.0)
+        max_vol = pair_config.max_volatility_threshold
         is_low_vol = volatility < max_vol
 
         # --- 2. MTF Trend Filter (1-Hour EMA 200) ---
@@ -117,7 +100,7 @@ class MeanReversionStrategy:
         # Boost position size if current volume activity exceeds average by 50%
         onchain_activity = curr.get("onchain_activity", curr.get("volume_ma", 0))
         volume_ma = curr.get("volume_ma", 1)
-        onchain_multiplier = 1.2 if onchain_activity > volume_ma * 1.5 else 1.0
+        onchain_multiplier = pair_config.mean_rev_onchain_multiplier if onchain_activity > volume_ma * 1.5 else 1.0
 
         # --- 4. Entry Logic: Dual-Band Confirmation ---
         signal = None
@@ -140,10 +123,13 @@ class MeanReversionStrategy:
         else:
             logger.debug(f"DEBUG: Close ({curr['close']:.5f}) < BB_Mid ({bb_mid_val:.5f}). Potential LONG.")
 
+        # Flag to determine if we should proceed with signal generation
+        proceed = True
+
         if not is_valid_regime:
             # Exception: Allow TREND if ML Score is decent (Counter-Trend Sniper)
             # We relaxed this from 0.8 to 0.6 to allow more pullback trades in trends
-            trend_ml_threshold = 0.6
+            trend_ml_threshold = pair_config.mean_rev_trend_ml_threshold
             if regime == "TREND" and ml_score is not None and ml_score > trend_ml_threshold:
                 logger.info(
                     f"Counter-Trend Sniper: Allowing trade in TREND regime due to ML score "
@@ -153,19 +139,20 @@ class MeanReversionStrategy:
             else:
                 logger.debug(f"Market regime {regime} not suitable for Mean Reversion")
                 reason_components.append(f"Filtered: regime {regime}")
-                # We continue to calculate other metrics for the decision log, but signal remains None
+                proceed = False
 
-        elif not is_low_vol:
+        if proceed and not is_low_vol:
             logger.debug(f"Market volatility too high ({volatility:.4f}), skipping mean reversion signal")
             reason_components.append(f"Filtered: high volatility ({volatility:.4f} >= {max_vol})")
+            proceed = False
 
-        else:
+        if proceed:
             # LONG: Uptrend + Touch Lower Bands (BB OR KC) + RSI Oversold
             # DEBUG: Log RSI check values
-            if curr["rsi"] < Config.RSI_OVERSOLD + 5:  # Log near misses too
-                logger.debug(f"DEBUG CHECK: RSI={curr['rsi']:.4f}, Threshold={Config.RSI_OVERSOLD}")
+            if curr["rsi"] < pair_config.rsi_oversold + 5:  # Log near misses too
+                logger.debug(f"DEBUG CHECK: RSI={curr['rsi']:.4f}, Threshold={pair_config.rsi_oversold}")
 
-            if curr["rsi"] < Config.RSI_OVERSOLD:
+            if curr["rsi"] < pair_config.rsi_oversold:
                 if not is_uptrend_1h:
                     logger.debug(
                         f"LONG Ignored: Not in 1H Uptrend (Close={curr['close']:.4f} < EMA200_1H={ema200_1h:.4f})"
@@ -173,7 +160,7 @@ class MeanReversionStrategy:
                     reason_components.append("LONG filtered: not in 1H uptrend")
                 else:
                     # Check if price touches either Bollinger Lower OR Keltner Lower (Current OR Previous)
-                    band_buffer = getattr(Config, "BAND_ATR_BUFFER", 0.0) * curr.get("atr", 0.0)
+                    band_buffer = pair_config.band_atr_buffer * curr.get("atr", 0.0)
                     touched_band = (
                         (curr["low"] <= curr["bb_lower"] - band_buffer)
                         or (curr["low"] <= curr.get("kc_lower", curr["bb_lower"]) - band_buffer)
@@ -217,9 +204,9 @@ class MeanReversionStrategy:
 
                             # --- Level 2 Confirmation (OBI) ---
                             obi_filter = True  # Pass by default
-                            if getattr(Config, "USE_L2_FILTERS", False) and confirmed_1m and l2_features:
+                            if Config.USE_L2_FILTERS and confirmed_1m and l2_features:
                                 obi = l2_features.get("obi", 0.0)
-                                obi_threshold = getattr(Config, "OBI_LONG_THRESHOLD", -0.4)
+                                obi_threshold = pair_config.obi_long_threshold
                                 # STANDARD LOGIC: Avoid catching falling knives (Extreme Negative OBI)
                                 if obi < obi_threshold:  # Require OBI > Threshold (Support)
                                     logger.debug(
@@ -233,12 +220,6 @@ class MeanReversionStrategy:
                         # DISABLED: Volume filter was too aggressive even at 0.5x MA
                         # We rely on OBI and Price Action for confirmation
                         vol_filter = True
-                        # volume = curr.get("volume", 0)
-                        # volume_ma = curr.get("volume_ma", 0)
-                        # if volume < volume_ma * 0.5:
-                        #     logger.debug(f"LONG Signal ignored: Low Volume ({volume:.2f} < {volume_ma:.2f})")
-                        #     reason_components.append(f"LONG filtered: low volume")
-                        #     vol_filter = False
 
                         if confirmed_1m and obi_filter and vol_filter:
                             # Check if we already reverted to mean in the same candle
@@ -250,7 +231,7 @@ class MeanReversionStrategy:
                             else:
                                 # Check Minimum Potential Profit (Distance to Mean)
                                 potential_profit = (bb_mid - curr["close"]) / curr["close"]
-                                min_profit = getattr(Config, "MEAN_REV_MIN_PROFIT", 0.02)
+                                min_profit = pair_config.mean_rev_min_profit
 
                                 if potential_profit < min_profit:
                                     logger.debug(
@@ -269,7 +250,7 @@ class MeanReversionStrategy:
                                         f"LONG candidate: potential_profit={potential_profit:.2%}>= {min_profit:.1%}"
                                     )
                                     # Dynamic sizing: deeper RSI = larger position
-                                    rsi_depth = (Config.RSI_OVERSOLD - curr["rsi"]) / 10  # 0-3 range
+                                    rsi_depth = (pair_config.rsi_oversold - curr["rsi"]) / 10  # 0-3 range
                                     size_multiplier = min(1.0 + rsi_depth, 2.0) * onchain_multiplier
                         else:
                             logger.debug(
@@ -278,9 +259,9 @@ class MeanReversionStrategy:
                             reason_components.append("LONG filtered: anti-knife failed (green & rsi_hook required)")
 
             # SHORT: Downtrend + Touch Upper Bands (BB OR KC) + RSI Overbought
-            elif is_downtrend_1h and curr["rsi"] > Config.RSI_OVERBOUGHT:
+            elif is_downtrend_1h and curr["rsi"] > pair_config.rsi_overbought:
                 # Check if price touches either Bollinger Upper OR Keltner Upper (Current OR Previous)
-                band_buffer = getattr(Config, "BAND_ATR_BUFFER", 0.0) * curr.get("atr", 0.0)
+                band_buffer = pair_config.band_atr_buffer * curr.get("atr", 0.0)
                 touched_band = (
                     (curr["high"] >= curr["bb_upper"] + band_buffer)
                     or (curr["high"] >= curr.get("kc_upper", curr["bb_upper"]) + band_buffer)
@@ -314,9 +295,9 @@ class MeanReversionStrategy:
 
                         # --- Level 2 Confirmation (OBI) ---
                         obi_filter = True  # Pass by default
-                        if getattr(Config, "USE_L2_FILTERS", False) and confirmed_1m and l2_features:
+                        if Config.USE_L2_FILTERS and confirmed_1m and l2_features:
                             obi = l2_features.get("obi", 0.0)
-                            obi_threshold = getattr(Config, "OBI_SHORT_THRESHOLD", 0.4)
+                            obi_threshold = pair_config.obi_short_threshold
                             # STANDARD LOGIC: Avoid shorting into pumps (Extreme Positive OBI)
                             if obi > obi_threshold:  # Require OBI < Threshold (Resistance)
                                 logger.debug(
@@ -330,12 +311,6 @@ class MeanReversionStrategy:
                         # DISABLED: Volume filter was too aggressive even at 0.5x MA
                         # We rely on OBI and Price Action for confirmation
                         vol_filter = True
-                        # volume = curr.get("volume", 0)
-                        # volume_ma = curr.get("volume_ma", 0)
-                        # if volume < volume_ma * 0.5:
-                        #      logger.debug(f"SHORT Signal ignored: Low Volume ({volume:.2f} < {volume_ma:.2f})")
-                        #      reason_components.append(f"SHORT filtered: low volume")
-                        #      vol_filter = False
 
                         if confirmed_1m and obi_filter and vol_filter:
                             # Check if we already reverted to mean in the same candle
@@ -347,7 +322,7 @@ class MeanReversionStrategy:
                                 signal = "SHORT"
                                 pre_ml_signal = "SHORT"
                                 # Dynamic sizing: higher RSI = larger position
-                                rsi_depth = (curr["rsi"] - Config.RSI_OVERBOUGHT) / 10  # 0-3 range
+                                rsi_depth = (curr["rsi"] - pair_config.rsi_overbought) / 10  # 0-3 range
                                 size_multiplier = min(1.0 + rsi_depth, 2.0) * onchain_multiplier
                     else:
                         logger.debug("SHORT Signal ignored: No Anti-Knife Confirmation (Red Candle + RSI Hook)")
@@ -359,20 +334,20 @@ class MeanReversionStrategy:
                 # Apply ML filter
                 if signal == "LONG":
                     # Tier 1: High Confidence
-                    if ml_score >= Config.ML_LONG_THRESHOLD:
-                        reason_components.append(f"LONG ML Tier 1 (score={ml_score:.2f} >= {Config.ML_LONG_THRESHOLD})")
+                    if ml_score >= pair_config.ml_long_threshold:
+                        reason_components.append(f"LONG ML Tier 1 (score={ml_score:.2f} >= {pair_config.ml_long_threshold})")
 
                     # Tier 2: Medium Confidence (Reduced Size)
-                    elif ml_score >= Config.ML_LONG_THRESHOLD_LOW:
+                    elif ml_score >= pair_config.ml_long_threshold_low:
                         size_multiplier *= 0.5
                         reason_components.append(
-                            f"LONG ML Tier 2 (score={ml_score:.2f} >= {Config.ML_LONG_THRESHOLD_LOW}): Size x0.5"
+                            f"LONG ML Tier 2 (score={ml_score:.2f} >= {pair_config.ml_long_threshold_low}): Size x0.5"
                         )
 
                     else:
-                        logger.debug(f"LONG Signal Filtered by ML: {ml_score:.2f} < {Config.ML_LONG_THRESHOLD_LOW}")
+                        logger.debug(f"LONG Signal Filtered by ML: {ml_score:.2f} < {pair_config.ml_long_threshold_low}")
                         reason_components.append(
-                            f"LONG filtered by ML: score={ml_score:.2f} < {Config.ML_LONG_THRESHOLD_LOW}"
+                            f"LONG filtered by ML: score={ml_score:.2f} < {pair_config.ml_long_threshold_low}"
                         )
                         signal = None
                         size_multiplier = 0.0
@@ -386,22 +361,22 @@ class MeanReversionStrategy:
 
                 elif signal == "SHORT":
                     # Tier 1: High Confidence
-                    if ml_score <= Config.ML_SHORT_THRESHOLD:
+                    if ml_score <= pair_config.ml_short_threshold:
                         reason_components.append(
-                            f"SHORT ML Tier 1 (score={ml_score:.2f} <= {Config.ML_SHORT_THRESHOLD})"
+                            f"SHORT ML Tier 1 (score={ml_score:.2f} <= {pair_config.ml_short_threshold})"
                         )
 
                     # Tier 2: Medium Confidence (Reduced Size)
-                    elif ml_score <= Config.ML_SHORT_THRESHOLD_LOW:
+                    elif ml_score <= pair_config.ml_short_threshold_low:
                         size_multiplier *= 0.5
                         reason_components.append(
-                            f"SHORT ML Tier 2 (score={ml_score:.2f} <= {Config.ML_SHORT_THRESHOLD_LOW}): Size x0.5"
+                            f"SHORT ML Tier 2 (score={ml_score:.2f} <= {pair_config.ml_short_threshold_low}): Size x0.5"
                         )
 
                     else:
-                        logger.debug(f"SHORT Signal Filtered by ML: {ml_score:.2f} > {Config.ML_SHORT_THRESHOLD_LOW}")
+                        logger.debug(f"SHORT Signal Filtered by ML: {ml_score:.2f} > {pair_config.ml_short_threshold_low}")
                         reason_components.append(
-                            f"SHORT filtered by ML: score={ml_score:.2f} > {Config.ML_SHORT_THRESHOLD_LOW}"
+                            f"SHORT filtered by ML: score={ml_score:.2f} > {pair_config.ml_short_threshold_low}"
                         )
                         signal = None
                         size_multiplier = 0.0
@@ -460,7 +435,7 @@ class MeanReversionStrategy:
             "rsi_hook": rsi_hook,
             "confirmed_1m": confirmed_1m,
             "obi_filter": obi_filter,
-            "l2_used": getattr(Config, "USE_L2_FILTERS", False),
+            "l2_used": Config.USE_L2_FILTERS,
             "obi": obi,
             "spread": spread,
             "market_depth_ratio": market_depth_ratio,
@@ -476,7 +451,7 @@ class MeanReversionStrategy:
 
         return base_result
 
-    def calculate_position_size(self, balance: float, entry_price: float, atr: float, multiplier: float = 1.0) -> float:
+    def calculate_position_size(self, balance: float, entry_price: float, atr: float, pair_config: PairConfig, multiplier: float = 1.0) -> float:
         """
         Calculates position size based on risk and ML multiplier.
         Caps size at available balance (Spot limit).
@@ -485,7 +460,7 @@ class MeanReversionStrategy:
             return 0.0
 
         risk_amount = balance * Config.RISK_PER_TRADE * multiplier
-        sl_distance = Config.ATR_MULTIPLIER * atr
+        sl_distance = pair_config.atr_multiplier * atr
 
         if sl_distance == 0:
             return 0.0
@@ -501,7 +476,7 @@ class MeanReversionStrategy:
 
         return qty
 
-    def get_exit_updates(self, position: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
+    def get_exit_updates(self, position: Dict[str, Any], analysis: Dict[str, Any], pair_config: PairConfig) -> Dict[str, Any]:
         """
         Determines exit updates with:
         1. Reversion to Mean (Middle Bollinger Band)
@@ -531,7 +506,7 @@ class MeanReversionStrategy:
 
         # Exit Condition 1: Reversion to Mean (Middle Bollinger Band)
         # Only exit if we have at least 0.5% profit to cover fees and slippage
-        min_exit_roi = 0.005
+        min_exit_roi = pair_config.mean_rev_min_roi
         if side == "LONG" and current_price >= bb_mid:
             if profit_pct > min_exit_roi:
                 should_exit = True
@@ -566,42 +541,42 @@ class MeanReversionStrategy:
 
         if side == "LONG":
             # Stage 3: Dynamic Trailing
-            if profit_pct > Config.RATCHET_TRAIL_ROI:
-                trail_sl = current_price - (atr * Config.RATCHET_TRAIL_ATR_MULTIPLIER)
+            if profit_pct > pair_config.ratchet_trail_roi:
+                trail_sl = current_price - (atr * pair_config.ratchet_trail_atr_multiplier)
                 if trail_sl > current_sl:
                     new_sl = trail_sl
                     logger.debug(f"Ratcheting SL (Stage 3): Trailing to {new_sl:.5f}")
 
             # Stage 2: Lock Profit
-            elif profit_pct > Config.RATCHET_LOCK_PROFIT_ROI:
-                lock_sl = entry_price * 1.005  # Lock 0.5% profit
+            elif profit_pct > pair_config.ratchet_lock_profit_roi:
+                lock_sl = entry_price * pair_config.mean_rev_lock_profit_multiplier_long  # Lock 0.5% profit
                 if lock_sl > current_sl:
                     new_sl = lock_sl
                     logger.debug(f"Ratcheting SL (Stage 2): Locking 0.5% profit at {new_sl:.5f}")
 
             # Stage 1: Breakeven
-            elif profit_pct > Config.RATCHET_BREAKEVEN_ROI:
+            elif profit_pct > pair_config.ratchet_breakeven_roi:
                 if current_sl < entry_price:
                     new_sl = entry_price
                     logger.debug(f"Ratcheting SL (Stage 1): Moving to Breakeven at {new_sl:.5f}")
 
         else:  # SHORT
             # Stage 3: Dynamic Trailing
-            if profit_pct > Config.RATCHET_TRAIL_ROI:
-                trail_sl = current_price + (atr * Config.RATCHET_TRAIL_ATR_MULTIPLIER)
+            if profit_pct > pair_config.ratchet_trail_roi:
+                trail_sl = current_price + (atr * pair_config.ratchet_trail_atr_multiplier)
                 if trail_sl < current_sl or current_sl == 0:
                     new_sl = trail_sl
                     logger.debug(f"Ratcheting SL (Stage 3): Trailing to {new_sl:.5f}")
 
             # Stage 2: Lock Profit
-            elif profit_pct > Config.RATCHET_LOCK_PROFIT_ROI:
-                lock_sl = entry_price * 0.995  # Lock 0.5% profit
+            elif profit_pct > pair_config.ratchet_lock_profit_roi:
+                lock_sl = entry_price * pair_config.mean_rev_lock_profit_multiplier_short  # Lock 0.5% profit
                 if lock_sl < current_sl or current_sl == 0:
                     new_sl = lock_sl
                     logger.debug(f"Ratcheting SL (Stage 2): Locking 0.5% profit at {new_sl:.5f}")
 
             # Stage 1: Breakeven
-            elif profit_pct > Config.RATCHET_BREAKEVEN_ROI:
+            elif profit_pct > pair_config.ratchet_breakeven_roi:
                 if current_sl > entry_price or current_sl == 0:
                     new_sl = entry_price
                     logger.debug(f"Ratcheting SL (Stage 1): Moving to Breakeven at {new_sl:.5f}")

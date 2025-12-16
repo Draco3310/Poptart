@@ -68,19 +68,23 @@ class FeatureEngine:
 
         # Ensure DatetimeIndex for Resampling
         if "timestamp" in df.columns:
-            df["timestamp"] = pd.to_datetime(df["timestamp"])
+            if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
             df.set_index("timestamp", inplace=True)
 
         # Run Pipeline
         for block in self.blocks:
             try:
                 df = block.apply(df, context=context)
-                nan_count = df.isna().sum().sum()
-                logger.info(f"DEBUG: After {block.__class__.__name__}, Rows: {len(df)}, NaNs: {nan_count}")
-                if nan_count > 0:
-                    # Log which columns have NaNs
-                    nan_cols = df.columns[df.isna().any()].tolist()
-                    logger.info(f"DEBUG: NaN Columns: {nan_cols}")
+                
+                # Only scan for NaNs in DEBUG mode to save performance (O(N*M))
+                if logger.isEnabledFor(logging.DEBUG):
+                    nan_count = df.isna().sum().sum()
+                    logger.debug(f"DEBUG: After {block.__class__.__name__}, Rows: {len(df)}, NaNs: {nan_count}")
+                    if nan_count > 0:
+                        # Log which columns have NaNs
+                        nan_cols = df.columns[df.isna().any()].tolist()
+                        logger.debug(f"DEBUG: NaN Columns: {nan_cols}")
             except Exception as e:
                 logger.error(f"Error in feature block {block.__class__.__name__}: {e}")
 

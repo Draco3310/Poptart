@@ -1,7 +1,7 @@
 import logging
 from typing import Any, Dict, Optional
 
-from src.config import Config
+from src.config import Config, PairConfig
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +17,8 @@ class RiskManager:
 
     def __init__(self) -> None:
         self.peak_balance = 0.0
-        self.max_drawdown_limit = 0.05  # 5% Max Drawdown
-        self.vol_target_annual = 0.40  # 40% Annualized Volatility Target
+        self.max_drawdown_limit = Config.MAX_DRAWDOWN_LIMIT
+        self.vol_target_annual = Config.VOL_TARGET_ANNUAL
         self.trading_paused = False
         self.pause_until = None
 
@@ -42,14 +42,14 @@ class RiskManager:
         return False
 
     def calculate_size(
-        self, balance: float, entry_price: float, atr: float, multiplier: float = 1.0, regime: str = "CHOP"
+        self, balance: float, entry_price: float, atr: float, pair_config: PairConfig, multiplier: float = 1.0, regime: str = "CHOP"
     ) -> float:
         """Wrapper for backward compatibility."""
-        result = self.calculate_size_with_meta(balance, entry_price, atr, multiplier, regime)
+        result = self.calculate_size_with_meta(balance, entry_price, atr, pair_config, multiplier, regime)
         return float(result["qty"])
 
     def calculate_size_with_meta(
-        self, balance: float, entry_price: float, atr: float, multiplier: float = 1.0, regime: str = "CHOP"
+        self, balance: float, entry_price: float, atr: float, pair_config: PairConfig, multiplier: float = 1.0, regime: str = "CHOP"
     ) -> Dict[str, Any]:
         """
         Calculates position size and returns detailed diagnostics.
@@ -68,13 +68,17 @@ class RiskManager:
             meta["reason"] = "CIRCUIT_BREAKER"
             return meta
 
+        if balance <= 0:
+            meta["reason"] = "BALANCE_ZERO_OR_NEGATIVE"
+            return meta
+
         if atr == 0 or entry_price == 0:
             meta["reason"] = "ATR_OR_PRICE_ZERO"
             return meta
 
         # 1. Base Risk Sizing (Fixed % Risk)
         risk_amount = balance * Config.RISK_PER_TRADE * multiplier
-        sl_distance = atr * Config.ATR_MULTIPLIER
+        sl_distance = atr * pair_config.atr_multiplier
 
         if sl_distance == 0:
             meta["reason"] = "SL_DISTANCE_ZERO"
@@ -93,11 +97,11 @@ class RiskManager:
         # 3. Regime Adjustment
         regime_scale = 1.0
         if regime == "TREND":
-            regime_scale = 1.2
+            regime_scale = Config.REGIME_SCALE_TREND
         elif regime == "CHOP":
-            regime_scale = 0.8
+            regime_scale = Config.REGIME_SCALE_CHOP
         elif regime == "VOLATILITY":
-            regime_scale = 0.0
+            regime_scale = Config.REGIME_SCALE_VOLATILITY
 
         meta["regime_scale"] = regime_scale
 
@@ -140,7 +144,7 @@ class RiskManager:
 
         # VPIN / Toxicity Check
         spread = l2_features.get("spread", 0.0)
-        if spread > 0.005:  # 0.5% spread is too high for liquid pair
+        if spread > Config.MAX_SPREAD_PERCENT:
             result["allowed"] = False
             result["reason"] = "SPREAD_TOO_HIGH"
             return result

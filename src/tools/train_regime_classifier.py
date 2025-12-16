@@ -14,59 +14,11 @@ sys.path.append(os.getcwd())
 from src.config import get_data_path, get_model_path, get_pair_config
 from src.core.feature_engine import FeatureEngine
 from src.tools.label_regimes import label_regimes
+from src.utils.data_loader import load_data
 
 # Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("RegimeTrainer")
-
-
-def load_data(filepath: str) -> pd.DataFrame:
-    logger.info(f"Loading data from {filepath}...")
-
-    # Check for header
-    peek = pd.read_csv(filepath, nrows=1, header=None)
-    first_val = str(peek.iloc[0, 0])
-
-    if "timestamp" in first_val.lower() or "open_time" in first_val.lower():
-        # Has header
-        df = pd.read_csv(filepath)
-        # Normalize columns
-        df.columns = [c.lower().strip() for c in df.columns]
-
-        # Map 'open_time' to 'timestamp' if needed
-        if "open_time" in df.columns and "timestamp" not in df.columns:
-            df.rename(columns={"open_time": "timestamp"}, inplace=True)
-
-    else:
-        # No header, assume Kraken format
-        df = pd.read_csv(filepath, header=None, names=["timestamp", "open", "high", "low", "close", "volume", "trades"])
-
-    # Downcast numeric columns to float32
-    numeric_cols = ["open", "high", "low", "close", "volume"]
-    for col in numeric_cols:
-        if col in df.columns:
-            df[col] = df[col].astype("float32")
-
-    # Convert timestamp
-    # Check if it's already datetime
-    if not pd.api.types.is_datetime64_any_dtype(df["timestamp"]):
-        # Check if it's ms or s
-        # If max > 3e10 (year 2920), it's probably ms
-        if df["timestamp"].max() > 30000000000:
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-        elif df["timestamp"].max() > 3000000000:  # Year 2065 in seconds
-            # Could be ms if data is very recent, but usually s
-            # Let's assume ms if it's huge, s if it's reasonable timestamp
-            # But wait, 1700000000 is 2023 in seconds.
-            # 1700000000000 is 2023 in ms.
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
-        else:
-            # Try auto
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s")
-
-    df.set_index("timestamp", inplace=True)
-    df.sort_index(inplace=True)
-    return df
 
 
 def train_regime_classifier(

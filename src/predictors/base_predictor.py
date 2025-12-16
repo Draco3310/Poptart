@@ -23,7 +23,7 @@ class BasePredictor(abc.ABC):
         pass
 
     @abc.abstractmethod
-    def predict(self, enriched_df: pd.DataFrame) -> float:
+    def predict_single(self, enriched_df: pd.DataFrame) -> float:
         """
         Generates a prediction score (0.0 to 1.0) for the *last* row of data.
 
@@ -34,3 +34,30 @@ class BasePredictor(abc.ABC):
             float: Confidence score between 0.0 (Strong Sell/Bearish) and 1.0 (Strong Buy/Bullish).
         """
         pass
+
+    def predict_batch(self, enriched_df: pd.DataFrame) -> Any:
+        """
+        Generates prediction scores for the entire DataFrame.
+
+        Args:
+            enriched_df: DataFrame containing all computed features.
+
+        Returns:
+            np.ndarray or pd.Series: Array of confidence scores.
+        """
+        raise NotImplementedError("Batch prediction not implemented for this predictor.")
+
+    def predict(self, enriched_df: pd.DataFrame) -> Any:
+        """
+        DEPRECATED: Use predict_single or predict_batch instead.
+        Wrapper that attempts to dispatch based on input size.
+        """
+        # Heuristic: If large dataframe, assume batch.
+        # Note: This is fragile for models like LSTM that need large lookback for single inference.
+        if len(enriched_df) > 200:
+            try:
+                return self.predict_batch(enriched_df)
+            except NotImplementedError:
+                pass
+        
+        return self.predict_single(enriched_df)

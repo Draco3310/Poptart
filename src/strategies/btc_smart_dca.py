@@ -3,6 +3,8 @@ from typing import Any, Dict
 
 import pandas as pd
 
+from src.config import PairConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -24,6 +26,7 @@ class BTCSmartDCAStrategy:
         current_price: float,
         current_balance_btc: float,
         current_equity_usdt: float,
+        pair_config: PairConfig,
         dca_config: Dict[str, Any],
     ) -> Dict[str, Any]:
         """
@@ -34,7 +37,8 @@ class BTCSmartDCAStrategy:
             current_price: Current price of BTC.
             current_balance_btc: Current amount of BTC held.
             current_equity_usdt: Total portfolio value in USDT.
-            dca_config: Configuration dict (target_allocation).
+            pair_config: Pair-specific configuration.
+            dca_config: Legacy configuration dict (target_allocation).
 
         Returns:
             Dict with 'signal' ("LONG" or None), 'size_multiplier' (fixed), and 'decision_context'.
@@ -52,11 +56,11 @@ class BTCSmartDCAStrategy:
             # 1. Check Allocation
             btc_value_usdt = current_balance_btc * current_price
             current_allocation = btc_value_usdt / current_equity_usdt if current_equity_usdt > 0 else 0.0
-            target_allocation = dca_config.get("target_allocation", 0.20)
+            target_allocation = pair_config.dca_target_allocation
             
             # Rebalance Buffer (5% relative)
             # Buy if allocation < 19% (for 20% target)
-            lower_threshold = target_allocation * 0.95
+            lower_threshold = target_allocation * pair_config.dca_rebalance_buffer_lower
 
             if current_allocation >= lower_threshold:
                 result["decision_context"]["reason"] = (
@@ -69,7 +73,7 @@ class BTCSmartDCAStrategy:
             target_value = current_equity_usdt * target_allocation
             shortfall_usdt = target_value - btc_value_usdt
             
-            if shortfall_usdt < 10.0: # Min trade size
+            if shortfall_usdt < pair_config.dca_min_trade_amount: # Min trade size
                  result["decision_context"]["reason"] = f"Shortfall too small ({shortfall_usdt:.2f})"
                  return result
 
@@ -94,7 +98,7 @@ class BTCSmartDCAStrategy:
             logger.error(f"Error in BTCSmartDCAStrategy: {e}")
             return result
 
-    def calculate_position_size(self, dca_config: Dict[str, Any], entry_price: float, shortfall_usdt: float = 0.0) -> float:
+    def calculate_position_size(self, pair_config: PairConfig, entry_price: float, shortfall_usdt: float = 0.0) -> float:
         """
         Calculates the quantity of BTC to buy.
         If shortfall_usdt is provided, uses that (Rebalancing).
@@ -102,13 +106,13 @@ class BTCSmartDCAStrategy:
         """
         notional = shortfall_usdt
         if notional <= 0:
-            notional = float(dca_config.get("notional_per_trade", 10.0))
+            notional = float(pair_config.dca_notional_per_trade or 10.0)
             
         if entry_price > 0:
             return notional / entry_price
         return 0.0
 
-    def get_exit_updates(self, position: Dict[str, Any], analysis: Dict[str, Any]) -> Dict[str, Any]:
+    def get_exit_updates(self, position: Dict[str, Any], analysis: Dict[str, Any], pair_config: PairConfig) -> Dict[str, Any]:
         """
         Checks for rebalancing (selling excess allocation).
         """
@@ -135,14 +139,14 @@ class BTCSmartDCAStrategy:
 
             # Rebalance Threshold (e.g. 5% relative buffer, so 20% -> 21%)
             # Or absolute buffer? Let's use relative 5% buffer.
-            buffer = 1.05
+            buffer = pair_config.dca_rebalance_buffer_upper
 
             if current_allocation > (target_allocation * buffer):
                 # Calculate excess value
                 target_value = current_equity_usdt * target_allocation
                 excess_value = btc_value_usdt - target_value
 
-                if excess_value > 10.0:  # Min trade size
+                if excess_value > pair_config.dca_min_trade_amount:  # Min trade size
                     excess_qty = excess_value / current_price
                     updates["exit_qty"] = excess_qty
                     updates["exit_reason"] = f"Rebalance (Alloc {current_allocation:.2%} > {target_allocation:.2%})"

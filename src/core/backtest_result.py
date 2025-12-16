@@ -10,10 +10,11 @@ class BacktestResult:
 
     # Metadata
     run_id: str
-    pair: str
     start_date: Optional[str]
     end_date: Optional[str]
     config: Dict[str, Any]
+    pair: Optional[str] = None  # Legacy single-pair support
+    pairs: List[str] = field(default_factory=list)  # Multi-pair support
 
     # Results
     metrics: Dict[str, float] = field(default_factory=dict)
@@ -28,6 +29,7 @@ class BacktestResult:
         return {
             "run_id": self.run_id,
             "pair": self.pair,
+            "pairs": self.pairs,
             "metrics": self.metrics,
             "trades_count": len(self.trades),
             "final_equity": self.metrics.get("final_equity", 0.0),

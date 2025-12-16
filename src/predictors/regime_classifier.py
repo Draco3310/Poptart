@@ -6,10 +6,10 @@ from typing import Any, Optional
 import joblib  # type: ignore
 import pandas as pd
 
-logger = logging.getLogger(__name__)
+from src.config import Config
+from src.predictors.model_registry import ModelRegistry
 
-# Global cache to prevent reloading the model 81 times in WFO
-_MODEL_CACHE: dict[str, Any] = {}
+logger = logging.getLogger(__name__)
 
 
 class MarketRegime(Enum):
@@ -36,12 +36,11 @@ class RegimeClassifier:
         self.features: list[str] = []
 
         if model_path:
-            # Check Cache First
-            if model_path in _MODEL_CACHE:
-                cached = _MODEL_CACHE[model_path]
+            # Check Registry First
+            cached = ModelRegistry.get(model_path)
+            if cached:
                 self.model = cached["model"]
                 self.features = cached["features"]
-                # logger.debug(f"Using cached Regime Classifier from {model_path}")
                 return
 
             if os.path.exists(model_path):
@@ -55,8 +54,8 @@ class RegimeClassifier:
                             self.model.n_jobs = 1
                         logger.info(f"Loaded Regime Classifier and {len(self.features)} features from {model_path}")
 
-                        # Cache it
-                        _MODEL_CACHE[model_path] = {"model": self.model, "features": self.features}
+                        # Register it
+                        ModelRegistry.register(model_path, {"model": self.model, "features": self.features})
                     else:
                         # Legacy fallback (if model saved directly)
                         self.model = artifact
@@ -78,8 +77,8 @@ class RegimeClassifier:
                             "volume_imbalance",
                             "dist_to_vwap_atr",
                         ]
-                        # Cache it
-                        _MODEL_CACHE[model_path] = {"model": self.model, "features": self.features}
+                        # Register it
+                        ModelRegistry.register(model_path, {"model": self.model, "features": self.features})
                 except Exception as e:
                     logger.error(f"Failed to load Regime Classifier: {e}")
             else:
@@ -103,11 +102,12 @@ class RegimeClassifier:
         curr = df.iloc[[-1]].copy()
 
         # Ensure derived features exist (must match label_regimes.py)
+        # Modify in-place to avoid redundant copies
         if "volatility" not in curr.columns and "atr" in curr.columns and "close" in curr.columns:
-            curr = curr.assign(volatility=curr["atr"] / curr["close"])
+            curr["volatility"] = curr["atr"] / curr["close"]
 
         if "ema_bias" not in curr.columns and "ema200" in curr.columns and "close" in curr.columns:
-            curr = curr.assign(ema_bias=(curr["close"] - curr["ema200"]) / curr["ema200"])
+            curr["ema_bias"] = (curr["close"] - curr["ema200"]) / curr["ema200"]
 
         # Check for missing features
         missing = [f for f in self.features if f not in curr.columns]
@@ -142,29 +142,28 @@ class RegimeClassifier:
         """
         Simple heuristic fallback when no ML model is available.
         Rules with Hysteresis:
-        - Enter TREND if ADX > Threshold + 5
-        - Exit TREND if ADX < Threshold - 5
+        - Enter TREND if ADX > Threshold + Hysteresis
+        - Exit TREND if ADX < Threshold - Hysteresis
         """
         try:
-            from src.config import Config
-
             curr = df.iloc[-1]
             adx = curr.get("adx", 0)
 
             # Use provided threshold or fallback to global config
             threshold = adx_threshold if adx_threshold is not None else getattr(Config, "ADX_THRESHOLD", 25)
+            hysteresis = getattr(Config, "REGIME_HYSTERESIS", 5.0)
 
             logger.debug(f"Heuristic Regime Check: ADX={adx:.2f}, Threshold={threshold}, Prev={previous_regime}")
 
             if previous_regime == MarketRegime.TREND:
                 # Harder to exit TREND
-                if adx < (threshold - 5):
+                if adx < (threshold - hysteresis):
                     return MarketRegime.RANGE
                 else:
                     return MarketRegime.TREND
             else:
                 # Harder to enter TREND (or initial state)
-                if adx > (threshold + 5):
+                if adx > (threshold + hysteresis):
                     return MarketRegime.TREND
                 else:
                     return MarketRegime.RANGE

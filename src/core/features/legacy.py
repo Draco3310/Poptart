@@ -24,8 +24,8 @@ class LegacyFeatureBlock(FeatureBlock):
         df = df.copy()
 
         # --- 0. Multi-Timeframe Features (MTF) ---
-        # Add 1-Hour Trend Context
-        df = self._add_mtf_features(df, period="1h")
+        # Add Trend Context (Default 1h)
+        df = self._add_mtf_features(df, period=Config.TIMEFRAME_CONTEXT)
 
         # --- 1. Momentum Indicators ---
 
@@ -36,34 +36,35 @@ class LegacyFeatureBlock(FeatureBlock):
         adx = ta.adx(df["high"], df["low"], df["close"], length=14)
         if adx is not None:
             # ADX usually returns ADX_14, DMP_14, DMN_14
-            for col in adx.columns:
-                if col.startswith("ADX_"):
-                    df["adx"] = adx[col]
+            # Simplify extraction
+            adx_col = next((c for c in adx.columns if c.startswith("ADX_")), None)
+            if adx_col:
+                df["adx"] = adx[adx_col]
 
         # MACD (12, 26, 9)
         macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
         if macd is not None:
             # Dynamically find columns
-            for col in macd.columns:
-                if col.startswith("MACD_"):
-                    df["macd"] = macd[col]
-                elif col.startswith("MACDh_"):
-                    df["macd_hist"] = macd[col]
-                elif col.startswith("MACDs_"):
-                    df["macd_signal"] = macd[col]
+            macd_col = next((c for c in macd.columns if c.startswith("MACD_")), None)
+            hist_col = next((c for c in macd.columns if c.startswith("MACDh_")), None)
+            signal_col = next((c for c in macd.columns if c.startswith("MACDs_")), None)
+            
+            if macd_col: df["macd"] = macd[macd_col]
+            if hist_col: df["macd_hist"] = macd[hist_col]
+            if signal_col: df["macd_signal"] = macd[signal_col]
 
         # --- 2. Volatility Indicators ---
 
         # Bollinger Bands (20, 2.0)
         bbands = ta.bbands(df["close"], length=20, std=2.0)  # type: ignore
         if bbands is not None:
-            for col in bbands.columns:
-                if col.startswith("BBL"):
-                    df["bb_lower"] = bbands[col]
-                elif col.startswith("BBM"):
-                    df["bb_mid"] = bbands[col]
-                elif col.startswith("BBU"):
-                    df["bb_upper"] = bbands[col]
+            lower_col = next((c for c in bbands.columns if c.startswith("BBL")), None)
+            mid_col = next((c for c in bbands.columns if c.startswith("BBM")), None)
+            upper_col = next((c for c in bbands.columns if c.startswith("BBU")), None)
+            
+            if lower_col: df["bb_lower"] = bbands[lower_col]
+            if mid_col: df["bb_mid"] = bbands[mid_col]
+            if upper_col: df["bb_upper"] = bbands[upper_col]
 
             # Recalculate width if possible
             if "bb_upper" in df.columns and "bb_lower" in df.columns and "bb_mid" in df.columns:
@@ -75,13 +76,13 @@ class LegacyFeatureBlock(FeatureBlock):
         # Keltner Channels (20, 2.0) - Volatility-adjusted bands
         kc = ta.kc(df["high"], df["low"], df["close"], length=20, scalar=2.0)
         if kc is not None:
-            for col in kc.columns:
-                if col.startswith("KCL"):
-                    df["kc_lower"] = kc[col]
-                elif col.startswith("KCM"):
-                    df["kc_mid"] = kc[col]
-                elif col.startswith("KCU"):
-                    df["kc_upper"] = kc[col]
+            lower_col = next((c for c in kc.columns if c.startswith("KCL")), None)
+            mid_col = next((c for c in kc.columns if c.startswith("KCM")), None)
+            upper_col = next((c for c in kc.columns if c.startswith("KCU")), None)
+            
+            if lower_col: df["kc_lower"] = kc[lower_col]
+            if mid_col: df["kc_mid"] = kc[mid_col]
+            if upper_col: df["kc_upper"] = kc[upper_col]
 
         # Volatility Scaled Returns (Short Vol / Long Vol)
         # Using 10 and 30 periods as seen in legacy code
@@ -96,10 +97,18 @@ class LegacyFeatureBlock(FeatureBlock):
 
         # EMA (200) - Trend Filter
         # Note: We keep the column name 'ema200' for ML compatibility, but use the configured period
-        df["ema200"] = ta.ema(df["close"], length=Config.EMA_PERIOD_SLOW)
+        ema_slow = 200
+        ema_fast = 50
+        
+        if context and "pair_config" in context:
+            pair_config = context["pair_config"]
+            ema_slow = getattr(pair_config, "ema_period_slow", 200)
+            ema_fast = getattr(pair_config, "ema_period_fast", 50)
+
+        df["ema200"] = ta.ema(df["close"], length=ema_slow)
 
         # EMA (50) - Fast Trend
-        df["ema50"] = ta.ema(df["close"], length=Config.EMA_PERIOD_FAST)
+        df["ema50"] = ta.ema(df["close"], length=ema_fast)
 
         # Volume Moving Average (20)
         df["volume_ma"] = ta.sma(df["volume"], length=20)
@@ -107,19 +116,25 @@ class LegacyFeatureBlock(FeatureBlock):
         # Volume Relative to MA
         df["volume_rel"] = df["volume"] / df["volume_ma"].replace(0, np.nan)
 
-        # On-Chain Activity Proxy (1440 min = 24 hours rolling volume average)
-        df["onchain_activity"] = df["volume"].rolling(window=1440, min_periods=1).mean()
+        # On-Chain Activity Proxy (24 hours rolling volume average)
+        # Use time-based rolling to support any timeframe (1m, 5m, etc.)
+        df["onchain_activity"] = df["volume"].rolling(window='24h', min_periods=1).mean()
 
         # --- 3.5 On-Chain Features (Placeholder) ---
-        df = self.add_onchain_features(df)
+        df = self.add_onchain_features(df, context)
 
         return df
 
-    def add_onchain_features(self, df: pd.DataFrame) -> pd.DataFrame:
+    def add_onchain_features(self, df: pd.DataFrame, context: Optional[Dict[str, Any]] = None) -> pd.DataFrame:
         """
         Placeholder for fetching and merging on-chain data (e.g., from XRPSCAN).
         Currently uses volume proxies.
         """
+        # Check if on-chain data is provided in context (pre-fetched)
+        if context and "onchain_data" in context:
+            # Merge logic would go here
+            pass
+            
         # Future: Fetch real on-chain data here
         # For now, we ensure 'tx_volume' exists as a feature for ML models
         if "tx_volume" not in df.columns:
@@ -139,8 +154,11 @@ class LegacyFeatureBlock(FeatureBlock):
             resampled = df.resample(period).agg(agg_rules)  # type: ignore
 
             # Calculate Indicators on Higher Timeframe
-            # 1. Trend: EMA 200
-            resampled[f"ema200_{period}"] = ta.ema(resampled["close"], length=Config.EMA_PERIOD_SLOW)
+            # 1. Trend: EMA 200 (Use default 200 as we don't have context here easily without refactoring signature)
+            # Ideally we should pass context to _add_mtf_features too, but for now hardcoding 200 is safer than breaking signature
+            # or we can use Config.EMA_PERIOD_SLOW if it existed, but it doesn't.
+            # Let's assume 200 for MTF context as it's standard.
+            resampled[f"ema200_{period}"] = ta.ema(resampled["close"], length=200)
 
             # 2. Momentum: RSI 14 (Optional, for confluence)
             resampled[f"rsi_{period}"] = ta.rsi(resampled["close"], length=14)

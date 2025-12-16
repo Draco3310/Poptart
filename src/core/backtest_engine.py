@@ -1,6 +1,7 @@
 import logging
 import os
 import random
+import warnings
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, cast
@@ -23,6 +24,9 @@ class BacktestEngine:
     """
     Core simulation engine for backtesting.
     Decoupled from reporting and file I/O.
+
+    DEPRECATED: Use src.core.async_backtest_engine.AsyncBacktestEngine instead.
+    This class is maintained for legacy single-pair optimization only.
     """
 
     def __init__(
@@ -35,6 +39,12 @@ class BacktestEngine:
         self.config_overrides = config_overrides or {}
         self.btc_data = btc_data
         self.logger = logging.getLogger(f"BacktestEngine_{pair_config.symbol}")
+        
+        warnings.warn(
+            "BacktestEngine is deprecated. Use AsyncBacktestEngine for multi-agent support.",
+            DeprecationWarning,
+            stacklevel=2
+        )
 
     def run(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> BacktestResult:
         """
@@ -45,25 +55,25 @@ class BacktestEngine:
         original_config = {}
 
         # Apply Pair Config Defaults
-        Config.SYMBOL = self.pair_config.symbol
-        Config.ATR_MULTIPLIER = self.pair_config.atr_multiplier
-        Config.MAX_VOLATILITY_THRESHOLD = self.pair_config.max_volatility_threshold
-        Config.MIN_TRADE_COOLDOWN_MINUTES = self.pair_config.cooldown_minutes
-        Config.ML_TREND_LONG_THRESHOLD = self.pair_config.ml_threshold_trend
-        Config.EMA_PERIOD_SLOW = self.pair_config.ema_period_slow
-        Config.EMA_PERIOD_FAST = self.pair_config.ema_period_fast
+        # Config.SYMBOL = self.pair_config.symbol
+        # Config.ATR_MULTIPLIER = self.pair_config.atr_multiplier
+        # Config.MAX_VOLATILITY_THRESHOLD = self.pair_config.max_volatility_threshold
+        # Config.MIN_TRADE_COOLDOWN_MINUTES = self.pair_config.cooldown_minutes
+        # Config.ML_TREND_LONG_THRESHOLD = self.pair_config.ml_threshold_trend
+        # Config.EMA_PERIOD_SLOW = self.pair_config.ema_period_slow
+        # Config.EMA_PERIOD_FAST = self.pair_config.ema_period_fast
         # Use Strategy Threshold if defined, else fallback to Regime Threshold
-        Config.ADX_THRESHOLD = self.pair_config.adx_threshold_strategy or self.pair_config.adx_threshold
+        # Config.ADX_THRESHOLD = self.pair_config.adx_threshold_strategy or self.pair_config.adx_threshold
 
         # Trend Strategy Params
-        if hasattr(self.pair_config, "trend_trailing_stop_type"):
-            Config.TREND_TRAILING_STOP_TYPE = self.pair_config.trend_trailing_stop_type
-        if hasattr(self.pair_config, "trend_trailing_stop_multiplier"):
-            Config.TREND_TRAILING_STOP_MULTIPLIER = self.pair_config.trend_trailing_stop_multiplier
-        if hasattr(self.pair_config, "trend_max_extension"):
-            Config.TREND_MAX_EXTENSION = self.pair_config.trend_max_extension
-        if hasattr(self.pair_config, "trend_rsi_max"):
-            Config.TREND_RSI_MAX = self.pair_config.trend_rsi_max
+        # if hasattr(self.pair_config, "trend_trailing_stop_type"):
+        #     Config.TREND_TRAILING_STOP_TYPE = self.pair_config.trend_trailing_stop_type
+        # if hasattr(self.pair_config, "trend_trailing_stop_multiplier"):
+        #     Config.TREND_TRAILING_STOP_MULTIPLIER = self.pair_config.trend_trailing_stop_multiplier
+        # if hasattr(self.pair_config, "trend_max_extension"):
+        #     Config.TREND_MAX_EXTENSION = self.pair_config.trend_max_extension
+        # if hasattr(self.pair_config, "trend_rsi_max"):
+        #     Config.TREND_RSI_MAX = self.pair_config.trend_rsi_max
 
         Config.DRY_RUN = False
 
@@ -107,12 +117,30 @@ class BacktestEngine:
                 self.logger.info(f"Adjusting data load start to {data_start_date} for warmup.")
 
             base_currency = self.pair_config.symbol.replace("USDT", "")
+            
+            # Load and Filter Data
+            df = pd.read_csv(data_path)
+            # Normalize columns
+            df.columns = [c.lower().strip() for c in df.columns]
+            if "open_time" in df.columns and "timestamp" not in df.columns:
+                df.rename(columns={"open_time": "timestamp"}, inplace=True)
+            if "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                df.sort_values("timestamp", inplace=True)
+                
+            # Filter by Date
+            if data_start_date:
+                df = df[df["timestamp"] >= pd.to_datetime(data_start_date)]
+            if end_date:
+                df = df[df["timestamp"] <= pd.to_datetime(end_date)]
+            
+            df.reset_index(drop=True, inplace=True)
+            
+            data_map = {self.pair_config.symbol: df}
+            
             exchange = SimulatedKrakenExchange(
-                data_path,
+                data_map,
                 initial_balance=10000.0,
-                start_date=data_start_date,
-                end_date=end_date,
-                base_currency=base_currency,
             )
             feature_engine = FeatureEngine()
             predictor_orchestrator = PredictorOrchestrator()
@@ -430,7 +458,8 @@ class BacktestEngine:
 
         analysis = strategy.analyze(
             df_slice,
-            ml_score,
+            pair_config=self.pair_config,
+            ml_score=ml_score,
             confirm_df=confirm_slice,
             l2_features=l2_features,
             enable_mean_reversion=self.pair_config.enable_mean_reversion,
@@ -489,11 +518,11 @@ class BacktestEngine:
         pos_strategy = position.get("strategy", "MeanReversion")
         updates = {}
         if pos_strategy == "TrendFollowing":
-            updates = strategy.trend_following.get_exit_updates(position, analysis)
+            updates = strategy.trend_following.get_exit_updates(position, analysis, self.pair_config)
         elif pos_strategy == "BTCSmartDCA":
-            updates = strategy.btc_dca.get_exit_updates(position, analysis)
+            updates = strategy.btc_dca.get_exit_updates(position, analysis, self.pair_config)
         else:
-            updates = strategy.mean_reversion.get_exit_updates(position, analysis)
+            updates = strategy.mean_reversion.get_exit_updates(position, analysis, self.pair_config)
 
         if updates.get("exit_signal"):
             self._close_position(
@@ -514,7 +543,7 @@ class BacktestEngine:
             exit_qty = updates["exit_qty"]
             exit_reason = updates.get("exit_reason", "Partial Exit")
         elif updates.get("tp1") and not position["tp1_hit"]:
-            exit_qty = position["qty"] * Config.TP1_RATIO
+            exit_qty = position["qty"] * self.pair_config.tp1_ratio
             exit_reason = "TP1"
             position["tp1_hit"] = True
 
@@ -593,7 +622,7 @@ class BacktestEngine:
 
         if self.pair_config.enable_dca_mode:
             # DCA Sizing
-            qty = strategy.btc_dca.calculate_position_size(dca_config, entry_price)
+            qty = strategy.btc_dca.calculate_position_size(self.pair_config, entry_price)
             executed = qty > 0 and (qty * entry_price) <= usdt_balance
             risk_decision = {
                 "qty": qty,
@@ -609,7 +638,7 @@ class BacktestEngine:
             regime = analysis.get("regime", "CHOP")
             multiplier = analysis.get("size_multiplier", 0.0)
 
-            risk_decision = risk_manager.calculate_size_with_meta(usdt_balance, entry_price, atr, multiplier, regime)
+            risk_decision = risk_manager.calculate_size_with_meta(usdt_balance, entry_price, atr, self.pair_config, multiplier, regime)
 
             l2_features = analysis.get("l2_features")
             gate = risk_manager.check_trade_gating_with_meta(l2_features)
@@ -628,7 +657,7 @@ class BacktestEngine:
             if self.pair_config.enable_dca_mode:
                 stop_loss = 0.0
             else:
-                sl_dist = atr * Config.ATR_MULTIPLIER
+                sl_dist = atr * self.pair_config.atr_multiplier
                 stop_loss = entry_price - sl_dist
 
             # Update or Create Position

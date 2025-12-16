@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional, cast
 import ccxt.async_support as ccxt
 import pandas as pd
 
-from src.config import Config
+from src.config import Config, PAIR_CONFIGS
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +29,7 @@ class KrakenExchange:
             # config["proxy"] = Config.HTTP_PROXY # Some versions use this
             logger.info(f"Using Proxy: {Config.HTTP_PROXY}")
 
-        self.exchange = ccxt.kraken(config)
+        self.exchange = ccxt.kraken(cast(Any, config))
         # Force trust_env for aiohttp to pick up env vars if explicit config fails
         self.exchange.aiohttp_trust_env = True
 
@@ -58,13 +58,7 @@ class KrakenExchange:
         # print(f"DEBUG: fetch_ohlcv called with limit={limit} for {target_symbol}")
 
         # Determine timeframe duration in seconds
-        tf_seconds = 60 # default 1m
-        if timeframe == "5m":
-            tf_seconds = 300
-        elif timeframe == "15m":
-            tf_seconds = 900
-        elif timeframe == "1h":
-            tf_seconds = 3600
+        tf_seconds = self.exchange.parse_timeframe(timeframe)
 
         # Calculate 'since' to fetch enough history
         # We add a buffer (1.5x) to ensure we cover gaps
@@ -157,6 +151,10 @@ class KrakenExchange:
 
     async def fetch_balance(self, currency: str = "USDT") -> float:
         """Fetches free balance for the specified currency."""
+        # Mock Balance for Dry Run
+        if Config.DRY_RUN and currency == "USDT":
+            return 10000.0
+
         try:
             balance = await self.exchange.fetch_balance()
             bal_dict = cast(Dict[str, Any], balance)
@@ -168,8 +166,12 @@ class KrakenExchange:
     async def fetch_total_equity(self) -> float:
         """
         Calculates total equity (USDT + Value of Holdings).
-        Only considers XRP, SOL, BTC to save API calls/complexity.
+        Dynamically checks assets defined in PAIR_CONFIGS.
         """
+        # Mock Equity for Dry Run
+        if Config.DRY_RUN:
+            return 10000.0
+
         try:
             balance = await self.exchange.fetch_balance()
             bal_dict = cast(Dict[str, Any], balance)
@@ -177,15 +179,39 @@ class KrakenExchange:
             usdt = float(bal_dict.get("USDT", {}).get("total", 0.0))
 
             equity = usdt
-            for coin in ["XRP", "SOL", "BTC"]:
+            
+            # Derive coins from PAIR_CONFIGS
+            # Assumes symbols are like "XRPUSDT" -> "XRP"
+            coins = set()
+            for symbol in PAIR_CONFIGS.keys():
+                base = symbol.replace("USDT", "")
+                coins.add(base)
+            
+            # Fetch tickers in parallel
+            tasks = []
+            active_coins = []
+            
+            for coin in coins:
                 qty = float(bal_dict.get(coin, {}).get("total", 0.0))
                 if qty > 0:
-                    try:
-                        ticker = await self.exchange.fetch_ticker(f"{coin}/USDT")
-                        price = float(ticker["last"])
-                        equity += qty * price
-                    except Exception as e:
-                        logger.warning(f"Could not fetch price for {coin}: {e}")
+                    active_coins.append(coin)
+                    tasks.append(self.exchange.fetch_ticker(f"{coin}/USDT"))
+            
+            if not tasks:
+                return equity
+                
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for i, res in enumerate(results):
+                coin = active_coins[i]
+                qty = float(bal_dict.get(coin, {}).get("total", 0.0))
+                
+                if isinstance(res, Exception):
+                    logger.warning(f"Could not fetch price for {coin}: {res}")
+                else:
+                    ticker = cast(Dict[str, Any], res)
+                    price = float(ticker["last"])
+                    equity += qty * price
 
             return equity
         except Exception as e:

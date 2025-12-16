@@ -49,7 +49,7 @@ class LSTMPredictor(BasePredictor):
             logger.error(f"Failed to load LSTM model: {e}")
             raise
 
-    def predict(self, enriched_df: pd.DataFrame) -> float:
+    def predict_single(self, enriched_df: pd.DataFrame) -> float:
         if not self.model:
             raise RuntimeError("Model not loaded.")
 
@@ -62,11 +62,6 @@ class LSTMPredictor(BasePredictor):
             return 0.5
 
         # Select data
-        # Assuming the model was trained on specific columns.
-        # In a real scenario, we need strict feature alignment.
-        # Here we take all numeric columns or a configured subset.
-        # For simplicity, we assume the enriched_df structure matches training.
-        # We drop timestamp/non-numeric columns.
         X_numeric = enriched_df.select_dtypes(include=[np.number])
 
         # Take last N rows
@@ -74,8 +69,6 @@ class LSTMPredictor(BasePredictor):
 
         # Handle Feature Count mismatch if necessary
         if hasattr(self, "n_features") and window_data.shape[1] != self.n_features:
-            # This is critical. If features don't match, we can't predict.
-            # For V2 prototype, we assume config ensures alignment.
             logger.error(f"Feature count mismatch. Model expects {self.n_features}, got {window_data.shape[1]}.")
             return 0.5
 
@@ -85,7 +78,6 @@ class LSTMPredictor(BasePredictor):
         prediction = self.model.predict(X_tensor, verbose=0)
 
         # Assuming output is a single probability [0,1] or [Bearish, Bullish]
-        # If it's [Bear, Bull], we take index 1. If scalar, take it directly.
         score = float(prediction[0][0]) if prediction.ndim == 2 else float(prediction[0])
 
         return score
