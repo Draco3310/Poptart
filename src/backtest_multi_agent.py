@@ -149,6 +149,18 @@ async def run_multi_agent_backtest(start_date: Optional[str] = None, end_date: O
             
         enriched_5m = feature_engine.compute_features(raw_5m, context=btc_context_5m)
         
+        # Patch missing features for ML compatibility
+        if "ema_bias" not in enriched_5m.columns and "dist_ema200" in enriched_5m.columns:
+            enriched_5m["ema_bias"] = enriched_5m["dist_ema200"]
+        
+        if "volatility" not in enriched_5m.columns:
+            if "bb_width" in enriched_5m.columns:
+                enriched_5m["volatility"] = enriched_5m["bb_width"]
+            elif "atr" in enriched_5m.columns and "close" in enriched_5m.columns:
+                enriched_5m["volatility"] = enriched_5m["atr"] / enriched_5m["close"]
+            else:
+                enriched_5m["volatility"] = 0.0
+
         # --- Batch ML Inference ---
         if Config.ML_ENABLED and sym != "BTCUSDT":
             logger.info(f"Running Batch ML Inference for {sym}...")
@@ -425,8 +437,10 @@ async def run_multi_agent_backtest(start_date: Optional[str] = None, end_date: O
             target_1m_ts = current_time # Current row is the latest 1m candle
             
             # Fetch Slices
-            df_5m = enriched_data_map[agent.symbol]
-            df_1m = enriched_confirm_map[agent.symbol]
+            # Normalize symbol key (remove slash) to match data map keys
+            data_key = agent.symbol.replace("/", "")
+            df_5m = enriched_data_map[data_key]
+            df_1m = enriched_confirm_map[data_key]
             
             if target_5m_ts not in df_5m.index or target_1m_ts not in df_1m.index:
                 continue
